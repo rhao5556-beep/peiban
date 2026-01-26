@@ -44,9 +44,13 @@ def run_evaluation(
     """Run LoCoMo evaluation"""
     print("[1/4] Running LoCoMo evaluation...")
     
+    # Use the correct path to the evaluation script
+    script_dir = Path(__file__).parent.parent  # Go up to project root
+    eval_script = script_dir / "affinity_evals" / "locomo" / "run_locomo.py"
+    
     cmd = [
         sys.executable,
-        "evals/run_locomo10_pipeline.py",
+        str(eval_script),
         "--backend_base_url", backend_url,
         "--dataset_path", str(dataset_path),
         "--output_dir", str(output_dir),
@@ -98,9 +102,13 @@ def score_with_llm(
     """Score outputs with LLM judge"""
     print("[2/4] Scoring with LLM judge...")
     
+    # Use correct path to scoring script
+    script_dir = Path(__file__).parent
+    scoring_script = script_dir / "score_locomo_with_llm.py"
+    
     cmd = [
         sys.executable,
-        "evals/score_locomo_with_llm.py",
+        str(scoring_script),
         "--in_path", str(model_outputs),
         "--out_path", str(output_dir / "scoring_summary.json"),
         "--failures_out_path", str(output_dir / "failures.json"),
@@ -138,9 +146,13 @@ def generate_report(
     """Generate evaluation report"""
     print("[3/4] Generating evaluation report...")
     
+    # Use correct path to report generator
+    script_dir = Path(__file__).parent
+    report_script = script_dir / "generate_locomo_report.py"
+    
     cmd = [
         sys.executable,
-        "evals/generate_locomo_report.py",
+        str(report_script),
         "--summary_path", str(summary_path),
         "--failures_path", str(failures_path),
         "--output_path", str(output_path),
@@ -160,8 +172,14 @@ def generate_report(
 def main() -> int:
     p = argparse.ArgumentParser(description="Complete LoCoMo Evaluation Pipeline")
     p.add_argument("--backend_url", default="http://localhost:8000", help="Backend URL")
-    p.add_argument("--dataset_path", default="data/locomo/locomo10.json", help="Dataset path")
-    p.add_argument("--output_dir", default="outputs/locomo_run", help="Output directory")
+    
+    # Fix dataset path to be relative to project root
+    project_root = Path(__file__).parent.parent
+    default_dataset = str(project_root / "data" / "locomo" / "locomo10.json")
+    default_output = str(project_root / "outputs" / "locomo_run")
+    
+    p.add_argument("--dataset_path", default=default_dataset, help="Dataset path")
+    p.add_argument("--output_dir", default=default_output, help="Output directory")
     p.add_argument("--mode", choices=["hybrid", "graph_only"], default="hybrid", help="Retrieval mode")
     p.add_argument("--limit_conversations", type=int, default=0, help="Limit number of conversations (0=all)")
     p.add_argument("--limit_questions", type=int, default=0, help="Limit questions per conversation (0=all)")
