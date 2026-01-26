@@ -8,6 +8,7 @@ from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
 from app.core.security import get_current_user
 from app.core.database import get_db, AsyncSessionLocal, get_redis_client, get_neo4j_driver
@@ -16,6 +17,7 @@ from app.services.affinity_service import AffinityService
 from app.services.retrieval_service import RetrievalService
 from app.services.graph_service import GraphService
 from app.services.outbox_service import TransactionManager, IdempotencyChecker
+from app.services.meme_injection_service import MemeInjectionService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -53,6 +55,19 @@ async def generate_stream_response(
     # 创建独立的数据库 session（因为 SSE 是长连接）
     async with AsyncSessionLocal() as db_session:
         try:
+            try:
+                await db_session.execute(
+                    text("""
+                        INSERT INTO sessions (id, user_id, started_at, turn_count)
+                        VALUES (:id, :user_id, NOW(), 0)
+                        ON CONFLICT (id) DO NOTHING
+                    """),
+                    {"id": session_id, "user_id": user_id},
+                )
+                await db_session.commit()
+            except Exception:
+                await db_session.rollback()
+
             # 1. 准备依赖服务
             redis_client = get_redis_client()
             neo4j_driver = get_neo4j_driver()
@@ -107,12 +122,20 @@ async def generate_stream_response(
             })
 
             logger.info("Starting process_message_stream...")
+            emotion_valence = None
             async for delta in conversation_service.process_message_stream(
                 user_id=user_id,
                 session_id=session_id,
                 message=message,
                 idempotency_key=idempotency_key
             ):
+                if delta.type == "metadata" and delta.metadata:
+                    emo = delta.metadata.get("emotion")
+                    if isinstance(emo, dict) and "valence" in emo:
+                        try:
+                            emotion_valence = float(emo.get("valence"))
+                        except Exception:
+                            pass
                 # 将 ConversationDelta 转换为 JSON
                 logger.debug(f"Delta: type={delta.type}, content={delta.content[:20] if delta.content else None}")
                 yield json.dumps({
@@ -121,6 +144,21 @@ async def generate_stream_response(
                     "memory_id": delta.memory_id,
                     "metadata": delta.metadata
                 })
+
+            try:
+                injector = MemeInjectionService(db_session=db_session)
+                meme_payload = await injector.maybe_select_and_record(
+                    user_id=user_id,
+                    session_id=session_id,
+                    emotion_valence=emotion_valence,
+                )
+                if meme_payload:
+                    yield json.dumps({
+                        "type": "meme",
+                        "metadata": meme_payload
+                    })
+            except Exception as e:
+                logger.warning(f"Meme injection skipped: {e}")
             
             logger.info("=== SSE Stream Complete")
             

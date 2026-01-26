@@ -94,10 +94,12 @@ class TransactionManager:
             # 1. 写入 pending 状态的 memory
             # 将 embedding list 转换为 pgvector 格式的字符串
             embedding_str = str(embedding) if embedding else None
-            await self.db.execute(
+            created_at = (
+                await self.db.execute(
                 text("""
                     INSERT INTO memories (id, user_id, content, embedding, valence, status, conversation_id, created_at)
                     VALUES (:id, :user_id, :content, :embedding, :valence, 'pending', :conversation_id, NOW())
+                    RETURNING created_at
                 """),
                 {
                     "id": memory_id,
@@ -107,7 +109,10 @@ class TransactionManager:
                     "valence": valence,
                     "conversation_id": conversation_id
                 }
-            )
+                )
+            ).scalar_one()
+
+            payload["created_at"] = int(created_at.timestamp())
             
             # 2. 写入 outbox 事件
             await self.db.execute(

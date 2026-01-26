@@ -4,6 +4,8 @@ import logging
 from typing import AsyncIterator, Optional, List
 from dataclasses import dataclass
 from datetime import datetime
+import json
+import re
 import openai
 
 from app.services.affinity_service import AffinityService, AffinitySignals
@@ -52,6 +54,12 @@ class ConversationMode:
     """
     GRAPH_ONLY = "graph_only"  # 纯图谱推理，用于能力评测
     HYBRID = "hybrid"          # 图谱 + 短期记忆，用于 Chat 体验
+
+
+class TaskIntent:
+    TEMPORAL = "temporal"
+    ORDERING = "ordering"
+    OTHER = "other"
 
 
 class EmotionAnalyzer:
@@ -365,7 +373,7 @@ class ConversationService:
             # 6. 流式生成回复
             full_reply = ""
             async for chunk in self._generate_stream(
-                message, retrieval_result.memories, affinity, emotion, tier, entity_facts
+                message, retrieval_result.memories, affinity, emotion, tier, entity_facts, False
             ):
                 full_reply += chunk
                 yield ConversationDelta(type="text", content=chunk)
@@ -426,7 +434,8 @@ class ConversationService:
         user_id: str,
         message: str,
         session_id: str,
-        mode: str = ConversationMode.HYBRID
+        mode: str = ConversationMode.HYBRID,
+        eval_mode: bool = False
     ) -> ConversationResponse:
         """
         处理用户消息
@@ -444,6 +453,10 @@ class ConversationService:
         - 这是防御式设计，不是只靠 Prompt 约束
         """
         start_time = datetime.now()
+
+        task_intent = TaskIntent.OTHER
+        if settings.INTENT_ROUTER_ENABLED:
+            task_intent = await self._infer_task_intent(message)
         
         # ========== Fast Path: 响应缓存检查 ==========
         # 对于简单问候，直接返回缓存响应（< 100ms）
@@ -499,6 +512,7 @@ class ConversationService:
                     mode=mode,
                     context_source={
                         "mode": mode,
+                        "task_intent": task_intent,
                         "cached": True,
                         "graph_facts_count": 0,
                         "history_turns_count": 0,
@@ -511,6 +525,7 @@ class ConversationService:
         # 上下文来源追踪
         context_source = {
             "mode": mode,
+            "task_intent": task_intent,
             "cached": False,
             "graph_facts_count": 0,
             "history_turns_count": 0,
@@ -573,7 +588,7 @@ class ConversationService:
         # 生成回复（使用重排序后的结果）
         reply = await self._generate_reply(
             message, ranked_memories, affinity, emotion, tier, 
-            ranked_facts, conversation_history, mode, context_source
+            ranked_facts, conversation_history, mode, context_source, eval_mode, task_intent
         )
         
         # 更新好感度
@@ -620,10 +635,11 @@ class ConversationService:
         affinity,
         emotion: dict,
         tier: int,
-        entity_facts: list = None
+        entity_facts: list = None,
+        eval_mode: bool = False
     ) -> AsyncIterator[str]:
         """流式生成回复"""
-        prompt = self._build_prompt(message, memories, affinity, emotion, entity_facts)
+        prompt = self._build_prompt(message, memories, affinity, emotion, entity_facts, None, ConversationMode.HYBRID, eval_mode, TaskIntent.OTHER)
         tier_config = TierRouter.TIERS.get(tier, TierRouter.TIERS[2])
         
         logger.info(f"Calling LLM API: model={tier_config['model']}, max_tokens={tier_config['max_tokens']}")
@@ -668,10 +684,12 @@ class ConversationService:
         entity_facts: list = None,
         conversation_history: list = None,
         mode: str = "hybrid",
-        context_source: dict | None = None
+        context_source: dict | None = None,
+        eval_mode: bool = False,
+        task_intent: str = TaskIntent.OTHER
     ) -> str:
         """生成回复（非流式）"""
-        prompt = self._build_prompt(message, memories, affinity, emotion, entity_facts, conversation_history, mode)
+        prompt = self._build_prompt(message, memories, affinity, emotion, entity_facts, conversation_history, mode, eval_mode, task_intent)
         tier_config = TierRouter.TIERS.get(tier, TierRouter.TIERS[2])
 
         if context_source is not None:
@@ -711,7 +729,9 @@ class ConversationService:
         emotion: dict,
         entity_facts: list = None,
         conversation_history: list = None,
-        mode: str = "hybrid"
+        mode: str = "hybrid",
+        eval_mode: bool = False,
+        task_intent: str = TaskIntent.OTHER
     ) -> str:
         """
         构建动态 Prompt
@@ -755,10 +775,23 @@ class ConversationService:
         # ========== 长期记忆：向量检索结果 ==========
         vector_context = ""
         if memories:
-            vector_context = "\n".join([
-                f"- {m.content} (相关度: {m.final_score:.2f})"
-                for m in memories[:5]
-            ])
+            def _fmt_time(dt: datetime) -> str:
+                if not isinstance(dt, datetime):
+                    return "未知时间"
+                if dt.timestamp() <= 0:
+                    return "未知时间"
+                return dt.strftime("%Y-%m-%d %H:%M")
+
+            if task_intent in (TaskIntent.TEMPORAL, TaskIntent.ORDERING):
+                vector_context = "\n".join([
+                    f"- [{_fmt_time(m.created_at)}] {m.content} (相关度: {m.final_score:.2f})"
+                    for m in memories[:20]
+                ])
+            else:
+                vector_context = "\n".join([
+                    f"- {m.content} (相关度: {m.final_score:.2f})"
+                    for m in memories[:5]
+                ])
         
         # ========== 短期记忆：对话历史（仅 Hybrid 模式）==========
         history_context = ""
@@ -785,6 +818,25 @@ class ConversationService:
 
 === 长期记忆（向量检索结果）===
 {vector_context if vector_context else "（没有找到相关的对话记忆）"}
+"""
+
+        if eval_mode:
+            prompt += """
+=== EVAL MODE（评测模式）===
+【非常重要】
+1. 只输出最终答案，不要寒暄、不要安慰语、不要反问用户、不要提及“记忆/图谱/检索/系统”。
+2. 遇到排序题必须输出明确序列（例如：1->2->3），不要输出建议。
+3. 遇到时间/时长题必须给出具体数值（尽量贴近参考的单位与精度），不要给“大概/约/左右”。
+4. 如果记忆里出现相对时间（yesterday/today/tomorrow）且同时给出对应的绝对日期提示（例如 yesterday=2023-05-07 或 base_date=2023-05-08），必须输出绝对日期（优先 YYYY-MM-DD；否则输出明确年月日），禁止输出“yesterday/昨天”这类相对词。
+"""
+
+        if task_intent in (TaskIntent.TEMPORAL, TaskIntent.ORDERING) and not eval_mode:
+            prompt += """
+【推理提示 - 仅当用户在问时间线/先后/排序时生效】
+1. 先在心里把涉及的事件/片段列成列表
+2. 优先使用提供的时间信息（如果有）对齐先后顺序；没有时间就用文本线索推断
+3. 输出时保持自然聊天语气，但必须把“顺序/多久/持续多久”回答清楚
+4. 如果确实缺关键时间点，先说明不确定，再追问 1 个最关键澄清问题
 """
         
         # 仅 Hybrid 模式添加短期记忆
@@ -818,6 +870,85 @@ class ConversationService:
 请根据以上信息，生成一个温暖、诚实的回复。"""
         
         return prompt
+
+    async def _infer_task_intent(self, message: str) -> str:
+        m = (message or "").strip()
+        if not m:
+            return TaskIntent.OTHER
+
+        temporal_patterns = [
+            r"多久",
+            r"多长时间",
+            r"持续(了)?(多长|多久)",
+            r"(历时|耗时)",
+            r"(几|多少)(秒|分钟|分|小时|天|周|月|年)",
+            r"\bwhen\b",
+            r"\bwhat\s+time\b",
+            r"\bhow\s+long\b",
+            r"\bduration\b",
+            r"\bdate\b",
+        ]
+        ordering_patterns = [
+            r"(先后|先来后到)",
+            r"(之后|后来|然后|接着)",
+            r"(顺序|排序|时间线|时间轴)",
+            r"(先发生|后发生)",
+            r"\b(before|after|then|next)\b",
+            r"\b(order|sequence|timeline)\b",
+        ]
+
+        if any(re.search(p, m, flags=re.IGNORECASE) for p in temporal_patterns):
+            return TaskIntent.TEMPORAL
+        if any(re.search(p, m, flags=re.IGNORECASE) for p in ordering_patterns):
+            return TaskIntent.ORDERING
+
+        if not settings.INTENT_ROUTER_LLM_FALLBACK_ENABLED:
+            return TaskIntent.OTHER
+
+        hint_tokens = [
+            "先", "后", "之后", "后来", "然后", "接着", "顺序", "排序", "时间线", "时间轴",
+            "多久", "多长", "持续", "历时", "耗时",
+            "timeline", "duration", "order", "rank", "sequence", "first", "then", "after", "before",
+        ]
+        if not any(t in m.lower() for t in hint_tokens) and not re.search(r"\d", m):
+            return TaskIntent.OTHER
+
+        try:
+            resp = await self.llm_client.chat.completions.create(
+                model=settings.INTENT_ROUTER_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "你是对话意图路由器。判断用户问题是否主要在问："
+                            "A) 时间/时长/时间线（temporal）"
+                            "B) 事件顺序/排序/先后（ordering）"
+                            "C) 其他（other）"
+                            "只输出 JSON：{\"intent\":\"temporal|ordering|other\",\"confidence\":0-1}"
+                        ),
+                    },
+                    {"role": "user", "content": m},
+                ],
+                temperature=0.0,
+                max_tokens=60,
+                stream=False,
+                timeout=settings.INTENT_ROUTER_TIMEOUT_S,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            if "{" in text:
+                text = re.search(r"\{[\s\S]*\}", text).group(0)
+            data = json.loads(text)
+            intent = str(data.get("intent", "other")).lower()
+            conf = float(data.get("confidence", 0))
+            if conf < settings.INTENT_ROUTER_THRESHOLD:
+                return TaskIntent.OTHER
+            if intent == "temporal":
+                return TaskIntent.TEMPORAL
+            if intent == "ordering":
+                return TaskIntent.ORDERING
+            return TaskIntent.OTHER
+        except Exception:
+            return TaskIntent.OTHER
     
     def _translate_relation(self, relation_type: str) -> str:
         """将关系类型翻译为中文"""

@@ -80,15 +80,16 @@ echo     Python: OK
 
 REM 4. 启动 FastAPI 服务
 echo.
-echo [4/4] Starting FastAPI server on port 8000...
+if "%PORT%"=="" set PORT=8000
+echo [4/4] Starting FastAPI server on port %PORT%...
 echo.
 echo ========================================
-echo   API Docs: http://localhost:8000/docs
-echo   Health:   http://localhost:8000/health
+echo   API Docs: http://localhost:%PORT%/docs
+echo   Health:   http://localhost:%PORT%/health
 echo   前端连接: http://localhost:5173 (如果前端在本机)
 echo ========================================
 echo.
 echo   按 Ctrl+C 停止服务
 echo.
 
-uvicorn app.main:app --reload --port 8000 --host 0.0.0.0
+uvicorn app.main:app --reload --port %PORT% --host 0.0.0.0

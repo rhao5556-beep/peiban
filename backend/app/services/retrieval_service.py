@@ -382,7 +382,7 @@ class RetrievalService:
                         elif isinstance(created_at_val, datetime):
                             created_at = created_at_val
                         else:
-                            created_at = datetime.now()
+                            created_at = datetime.fromtimestamp(0)
                         
                         # 获取相似度分数
                         score = hit.score if hasattr(hit, 'score') else (hit.distance if hasattr(hit, 'distance') else 0.0)

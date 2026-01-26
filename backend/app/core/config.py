@@ -46,6 +46,12 @@ class Settings(BaseSettings):
 
     LLM_STRICT_MODE: bool = False
 
+    INTENT_ROUTER_ENABLED: bool = True
+    INTENT_ROUTER_LLM_FALLBACK_ENABLED: bool = True
+    INTENT_ROUTER_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
+    INTENT_ROUTER_THRESHOLD: float = 0.6
+    INTENT_ROUTER_TIMEOUT_S: float = 0.6
+
     # 图谱事实检索降级配置
     GRAPH_FACTS_ENABLED: bool = True
     GRAPH_FACTS_TIMEOUT_S: float = 0.9

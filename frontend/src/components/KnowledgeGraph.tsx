@@ -73,7 +73,7 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ data, day }) => {
             'opacity': 'mapData(weight, 0, 1, 0.3, 1)' // 根据权重调整透明度
           }
         }
-      ],
+      ] as any,
       layout: { name: 'grid' },
       wheelSensitivity: 0.2,
     });
@@ -81,6 +81,7 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ data, day }) => {
     return () => {
       if (cyRef.current) {
         cyRef.current.destroy();
+        cyRef.current = null;
       }
     };
   }, []);
@@ -92,6 +93,7 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ data, day }) => {
     if (!data || !data.nodes || data.nodes.length === 0) return;
 
     const cy = cyRef.current;
+    cy.stop();
     
     // 创建节点 ID 集合用于验证边
     const nodeIds = new Set(data.nodes.map(n => n.id));
@@ -131,20 +133,25 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ data, day }) => {
     // Run layout with animation
     const layout = cy.layout({
       name: 'cose',
-      animate: true,
-      animationDuration: 800,
+      animate: false,
       fit: true,
       padding: 30,
       randomize: false, 
       componentSpacing: 100,
-      nodeRepulsion: (node: any) => 400000,
-      edgeElasticity: (edge: any) => 100,
+      nodeRepulsion: () => 400000,
+      edgeElasticity: () => 100,
       nestingFactor: 5,
     } as any);
 
     layout.run();
     setLayoutReady(true);
 
+    return () => {
+      try {
+        layout.stop();
+      } catch (e) {
+      }
+    };
   }, [data]);
 
   // 6.1.3 Export Functionality

@@ -1,4 +1,4 @@
-import type { Message, Sender, MemoryState, GraphData, AffinityPoint, StreamEvent, MemoryStatusResponse } from '../types';
+import type { GraphData, AffinityPoint, StreamEvent, MemoryStatusResponse, ProactiveMessage, ProactivePreferences } from '../types';
 import { MOCK_GRAPH_DATA_DAY_1, MOCK_GRAPH_DATA_DAY_15, MOCK_GRAPH_DATA_DAY_30, MOCK_AFFINITY_HISTORY } from '../constants';
 
 // ============================================================================
@@ -9,7 +9,7 @@ import { MOCK_GRAPH_DATA_DAY_1, MOCK_GRAPH_DATA_DAY_15, MOCK_GRAPH_DATA_DAY_30, 
 const USE_MOCK_DATA = false; 
 
 // 2. 更新为后端 v1 接口地址
-const API_BASE_URL = 'http://localhost:8000/api/v1'; 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'; 
 
 // 3. 动态获取 Token
 let cachedToken: string | null = null;
@@ -35,13 +35,14 @@ const getToken = async (): Promise<string> => {
     });
     if (response.ok) {
       const data = await response.json();
-      cachedToken = data.access_token;
+      const token = typeof data?.access_token === 'string' ? data.access_token : '';
+      cachedToken = token;
       // 保存 user_id 到 localStorage
       if (data.user_id && !cachedUserId) {
         cachedUserId = data.user_id;
         localStorage.setItem(STORAGE_KEY, data.user_id);
       }
-      return cachedToken;
+      return token;
     }
   } catch (e) {
     console.error('Failed to get token', e);
@@ -50,6 +51,19 @@ const getToken = async (): Promise<string> => {
 };
 
 // ============================================================================
+
+const fetchJsonWithAuth = async <T>(path: string, init?: RequestInit): Promise<T> => {
+  const token = await getToken();
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...init,
+    headers: {
+      ...(init?.headers || {}),
+      'Authorization': `Bearer ${token}`
+    }
+  });
+  if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+  return response.json() as Promise<T>;
+};
 
 // Helper to mimic backend data transformation
 const adaptBackendGraph = (backendData: any): GraphData => {
@@ -142,6 +156,291 @@ export const api = {
         console.error("Failed to fetch affinity", e);
         return [];
     }
+  },
+
+  getContentPreference: async (): Promise<{
+    enabled: boolean;
+    daily_limit: number;
+    preferred_sources: string[];
+    quiet_hours_start: string | null;
+    quiet_hours_end: string | null;
+  }> => {
+    const data = await fetchJsonWithAuth<{
+      content_recommendation_enabled: boolean;
+      preferred_sources: string[];
+      excluded_topics: string[];
+      max_daily_recommendations: number;
+      quiet_hours_start: string;
+      quiet_hours_end: string;
+      last_recommendation_at: string | null;
+    }>('/content/preference');
+
+    return {
+      enabled: data.content_recommendation_enabled,
+      daily_limit: data.max_daily_recommendations,
+      preferred_sources: data.preferred_sources || [],
+      quiet_hours_start: data.quiet_hours_start ?? null,
+      quiet_hours_end: data.quiet_hours_end ?? null
+    };
+  },
+
+  updateContentPreference: async (preference: {
+    enabled: boolean;
+    daily_limit: number;
+    preferred_sources: string[];
+    quiet_hours_start: string | null;
+    quiet_hours_end: string | null;
+  }): Promise<{
+    enabled: boolean;
+    daily_limit: number;
+    preferred_sources: string[];
+    quiet_hours_start: string | null;
+    quiet_hours_end: string | null;
+  }> => {
+    const data = await fetchJsonWithAuth<{
+      content_recommendation_enabled: boolean;
+      preferred_sources: string[];
+      excluded_topics: string[];
+      max_daily_recommendations: number;
+      quiet_hours_start: string;
+      quiet_hours_end: string;
+      last_recommendation_at: string | null;
+    }>('/content/preference', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content_recommendation_enabled: preference.enabled,
+        preferred_sources: preference.preferred_sources,
+        max_daily_recommendations: preference.daily_limit,
+        quiet_hours_start: preference.quiet_hours_start,
+        quiet_hours_end: preference.quiet_hours_end
+      })
+    });
+
+    return {
+      enabled: data.content_recommendation_enabled,
+      daily_limit: data.max_daily_recommendations,
+      preferred_sources: data.preferred_sources || [],
+      quiet_hours_start: data.quiet_hours_start ?? null,
+      quiet_hours_end: data.quiet_hours_end ?? null
+    };
+  },
+
+  getContentRecommendations: async (): Promise<Array<{
+    id: string;
+    contentId: string;
+    title: string;
+    summary: string | null;
+    url: string;
+    source: string;
+    tags: string[];
+    publishedAt: string | null;
+    matchScore: number;
+    rankPosition: number;
+    recommendedAt: string;
+    clickedAt: string | null;
+    feedback: string | null;
+  }>> => {
+    const data = await fetchJsonWithAuth<Array<{
+      id: string;
+      content_id: string;
+      title: string;
+      summary: string | null;
+      url: string;
+      source: string;
+      tags: string[];
+      published_at: string | null;
+      match_score: number;
+      rank_position: number;
+      recommended_at: string;
+      clicked_at: string | null;
+      feedback: string | null;
+    }>>('/content/recommendations');
+
+    return data.map((item) => ({
+      id: item.id,
+      contentId: item.content_id,
+      title: item.title,
+      summary: item.summary,
+      url: item.url,
+      source: item.source,
+      tags: item.tags || [],
+      publishedAt: item.published_at,
+      matchScore: item.match_score,
+      rankPosition: item.rank_position,
+      recommendedAt: item.recommended_at,
+      clickedAt: item.clicked_at,
+      feedback: item.feedback
+    }));
+  },
+
+  submitRecommendationFeedback: async (
+    recommendationId: string,
+    action: 'clicked' | 'liked' | 'disliked' | 'ignored'
+  ): Promise<{ success: boolean; message: string }> => {
+    return fetchJsonWithAuth<{ success: boolean; message: string }>(
+      `/content/recommendations/${recommendationId}/feedback`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+      }
+    );
+  },
+
+  getMemePreferences: async (): Promise<{
+    user_id: string;
+    meme_enabled: boolean;
+    created_at: string;
+    updated_at: string;
+  }> => {
+    return fetchJsonWithAuth('/memes/preferences');
+  },
+
+  updateMemePreferences: async (payload: { meme_enabled: boolean }): Promise<{
+    user_id: string;
+    meme_enabled: boolean;
+    created_at: string;
+    updated_at: string;
+  }> => {
+    const qs = new URLSearchParams({ meme_enabled: String(payload.meme_enabled) }).toString();
+    return fetchJsonWithAuth(`/memes/preferences?${qs}`, { method: 'PUT' });
+  },
+
+  getTrendingMemes: async (limit = 20): Promise<{
+    memes: Array<{
+      id: string;
+      image_url: string | null;
+      text_description: string;
+      source_platform: string;
+      category: string | null;
+      trend_score: number;
+      trend_level: string;
+      usage_count: number;
+    }>;
+    total: number;
+  }> => {
+    const qs = new URLSearchParams({ limit: String(limit) }).toString();
+    return fetchJsonWithAuth(`/memes/trending?${qs}`);
+  },
+
+  getMemeStats: async (): Promise<{
+    total_memes: number;
+    approved_memes: number;
+    trending_memes: number;
+    acceptance_rate: number;
+    avg_trend_score: number;
+  }> => {
+    return fetchJsonWithAuth('/memes/stats');
+  },
+
+  submitMemeFeedback: async (
+    usageId: string,
+    reaction: 'liked' | 'ignored' | 'disliked'
+  ): Promise<{ success: boolean; message: string }> => {
+    return fetchJsonWithAuth('/memes/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usage_id: usageId, reaction })
+    });
+  },
+
+  getMemories: async (limit = 50): Promise<Array<{
+    id: string;
+    content: string;
+    valence: number | null;
+    status: string;
+    created_at: string;
+    committed_at: string | null;
+  }>> => {
+    const qs = new URLSearchParams({ limit: String(limit) }).toString();
+    return fetchJsonWithAuth(`/memories/?${qs}`);
+  },
+
+  getMemory: async (memoryId: string): Promise<{
+    id: string;
+    content: string;
+    valence: number | null;
+    status: string;
+    created_at: string;
+    committed_at: string | null;
+  }> => {
+    return fetchJsonWithAuth(`/memories/${memoryId}`);
+  },
+
+  deleteMemories: async (memoryIds: string[]): Promise<any> => {
+    return fetchJsonWithAuth('/memories/', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ memory_ids: memoryIds, delete_all: false })
+    });
+  },
+
+  deleteAllMemories: async (): Promise<any> => {
+    return fetchJsonWithAuth('/memories/', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delete_all: true })
+    });
+  },
+
+  getDashboard: async (): Promise<any> => {
+    const [affinity, memories] = await Promise.all([
+      fetchJsonWithAuth<any>('/affinity/'),
+      fetchJsonWithAuth<any>('/memories/?limit=50')
+    ]);
+
+    const relationshipScoreRaw = typeof affinity?.score === 'number' ? affinity.score : 0.5;
+    const score100 = typeof affinity?.score_100 === 'number' ? affinity.score_100 : Math.round(relationshipScoreRaw * 100);
+    const state = typeof affinity?.state === 'string' ? affinity.state : 'acquaintance';
+
+    return {
+      relationship: {
+        state,
+        state_display: affinity?.state_v2 ?? state,
+        score: score100,
+        score_raw: relationshipScoreRaw,
+        hearts: ''
+      },
+      days_known: 0,
+      memories: { count: Array.isArray(memories) ? memories.length : 0, can_view_details: true },
+      feedback: { likes: 0, dislikes: 0, saves: 0, favorites: 0 },
+      health_reminder: affinity?.health_state ? { message: String(affinity.health_state) } : null
+    };
+  },
+
+  getProactiveMessages: async (status?: string, limit = 10): Promise<{ messages: ProactiveMessage[]; total: number }> => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (status) params.set('status', status);
+    return fetchJsonWithAuth(`/proactive/messages?${params.toString()}`);
+  },
+
+  acknowledgeProactiveMessage: async (
+    messageId: string,
+    action: 'read' | 'ignore' | 'disable'
+  ): Promise<{ success: boolean; message_id: string; action: string; status: string }> => {
+    const params = new URLSearchParams({ action }).toString();
+    return fetchJsonWithAuth(`/proactive/messages/${messageId}/ack?${params}`, { method: 'POST' });
+  },
+
+  getProactivePreferences: async (): Promise<ProactivePreferences> => {
+    return fetchJsonWithAuth('/proactive/preferences');
+  },
+
+  updateProactivePreferences: async (preferences: ProactivePreferences): Promise<any> => {
+    const params = new URLSearchParams({
+      proactive_enabled: String(preferences.proactive_enabled),
+      morning_greeting_enabled: String(preferences.morning_greeting_enabled),
+      evening_greeting_enabled: String(preferences.evening_greeting_enabled),
+      silence_reminder_enabled: String(preferences.silence_reminder_enabled),
+      quiet_hours_start: preferences.quiet_hours_start,
+      quiet_hours_end: preferences.quiet_hours_end,
+      max_messages_per_day: String(preferences.max_messages_per_day),
+      preferred_morning_time: preferences.preferred_morning_time,
+      preferred_evening_time: preferences.preferred_evening_time
+    }).toString();
+
+    return fetchJsonWithAuth(`/proactive/preferences?${params}`, { method: 'PUT' });
   },
 
   /**

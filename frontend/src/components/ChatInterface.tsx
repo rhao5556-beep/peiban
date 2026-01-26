@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Sender, MemoryState } from '../types';
-import type { Message, StreamEvent } from '../types';
+import type { Message } from '../types';
 import { api } from '../services/api';
 import MemoryStatus from './MemoryStatus';
 import { Send, Activity, Zap } from 'lucide-react';

@@ -184,7 +184,8 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
             user_id=user_id,
             content=content,
             embedding=embedding,
-            valence=payload.get("valence", 0)
+            valence=payload.get("valence", 0),
+            created_at_ts=payload.get("created_at")
         )
         
         # 6. 写入 Neo4j（使用 IR Critic 校验后的结果）
@@ -599,7 +600,8 @@ def write_to_milvus_sync(
     user_id: str,
     content: str,
     embedding: List[float],
-    valence: float
+    valence: float,
+    created_at_ts: int | None = None
 ) -> str:
     """写入 Milvus 向量存储（同步版本）"""
     from pymilvus import connections, Collection, utility
@@ -635,7 +637,7 @@ def write_to_milvus_sync(
             "content": content[:4096] if content else "",
             "embedding": embedding,
             "valence": float(valence) if valence else 0.0,
-            "created_at": int(datetime.now().timestamp()),
+            "created_at": int(created_at_ts) if isinstance(created_at_ts, int) else int(datetime.now().timestamp()),
         }]
         
         result = collection.insert(data)

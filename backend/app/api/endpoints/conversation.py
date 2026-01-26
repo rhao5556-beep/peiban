@@ -27,6 +27,8 @@ class MessageRequest(BaseModel):
     session_id: Optional[str] = None
     idempotency_key: Optional[str] = None
     mode: Literal["graph_only", "hybrid"] = "hybrid"  # 对话模式
+    eval_mode: bool = False
+    eval_mode: bool = False  # 评测模式：更结构化的回答与上下文呈现（默认关闭）
 
 
 class MessageResponse(BaseModel):
@@ -99,7 +101,8 @@ async def send_message(
             user_id=user_id,
             message=request.message,
             session_id=session_id,
-            mode=request.mode  # graph_only 或 hybrid
+            mode=request.mode,  # graph_only 或 hybrid
+            eval_mode=request.eval_mode
         )
         
         return MessageResponse(

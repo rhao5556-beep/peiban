@@ -10,7 +10,7 @@ class MemeResponse(BaseModel):
     
     用于返回单个表情包的详细信息
     """
-    id: str
+    id: UUID
     image_url: Optional[str] = None  # MVP阶段纯文本表情包可为空
     text_description: str
     source_platform: str  # 'weibo', 'douyin', 'bilibili'
@@ -69,8 +69,7 @@ class MemeFeedbackRequest(BaseModel):
     用于POST /api/v1/memes/feedback端点
     用户对表情包使用提供反馈
     """
-    user_id: str = Field(description="用户ID (UUID格式)")
-    meme_id: str = Field(description="表情包ID (UUID格式)")
+    usage_id: str = Field(description="使用记录ID (UUID格式)")
     reaction: str = Field(description="用户反应: liked, ignored, disliked")
     
     @field_validator('reaction')
@@ -84,7 +83,7 @@ class MemeFeedbackRequest(BaseModel):
             )
         return v
     
-    @field_validator('user_id', 'meme_id')
+    @field_validator('usage_id')
     @classmethod
     def validate_uuid_format(cls, v: str) -> str:
         """验证UUID格式"""
@@ -97,8 +96,7 @@ class MemeFeedbackRequest(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "user_id": "123e4567-e89b-12d3-a456-426614174000",
-                "meme_id": "550e8400-e29b-41d4-a716-446655440000",
+                "usage_id": "789e0123-e89b-12d3-a456-426614174000",
                 "reaction": "liked"
             }
         }
