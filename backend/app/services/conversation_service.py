@@ -369,37 +369,47 @@ class ConversationService:
                 type="metadata",
                 metadata={"entity_facts_count": len(entity_facts), "phase": "facts_retrieved"}
             )
+
+            conversation_history = await self._get_conversation_history(session_id, limit=5)
             
             # 6. 流式生成回复
             full_reply = ""
             async for chunk in self._generate_stream(
-                message, retrieval_result.memories, affinity, emotion, tier, entity_facts, False
+                message, retrieval_result.memories, affinity, emotion, tier, entity_facts, conversation_history, ConversationMode.HYBRID, False, TaskIntent.OTHER
             ):
                 full_reply += chunk
                 yield ConversationDelta(type="text", content=chunk)
             
-            # 7. Slow Path: 异步写入记忆（通过 Outbox）
-            embedding = await self.embedding_service.encode(message)
-            memory_id, event_id = await self.transaction_manager.create_memory_with_outbox(
+            await self._save_conversation_turn(
+                session_id=session_id,
                 user_id=user_id,
-                content=message,
-                embedding=embedding,
-                valence=emotion.get("valence", 0),
-                conversation_id=session_id,
-                idempotency_key=idempotency_key
+                user_message=message,
+                assistant_reply=full_reply,
+                emotion=emotion,
+                affinity_score=affinity.new_score,
             )
-            
-            # 更新幂等键中的 memory_id
-            await self.idempotency_checker.set_memory_id(idempotency_key, memory_id)
-            
-            yield ConversationDelta(
-                type="memory_pending",
-                memory_id=memory_id,
-                metadata={
-                    "event_id": event_id,
-                    "message": "记忆将在后台写入，下次对话生效"
-                }
-            )
+
+            if self._should_write_long_term_memory(message):
+                embedding = await self.embedding_service.encode(message)
+                memory_id, event_id = await self.transaction_manager.create_memory_with_outbox(
+                    user_id=user_id,
+                    content=message,
+                    embedding=embedding,
+                    valence=emotion.get("valence", 0),
+                    conversation_id=session_id,
+                    idempotency_key=idempotency_key
+                )
+                
+                await self.idempotency_checker.set_memory_id(idempotency_key, memory_id)
+                
+                yield ConversationDelta(
+                    type="memory_pending",
+                    memory_id=memory_id,
+                    metadata={
+                        "event_id": event_id,
+                        "message": "记忆将在后台写入，稍后生效"
+                    }
+                )
             
             # 8. 更新好感度
             signals = AffinitySignals(
@@ -636,10 +646,13 @@ class ConversationService:
         emotion: dict,
         tier: int,
         entity_facts: list = None,
-        eval_mode: bool = False
+        conversation_history: list = None,
+        mode: str = ConversationMode.HYBRID,
+        eval_mode: bool = False,
+        task_intent: str = TaskIntent.OTHER
     ) -> AsyncIterator[str]:
         """流式生成回复"""
-        prompt = self._build_prompt(message, memories, affinity, emotion, entity_facts, None, ConversationMode.HYBRID, eval_mode, TaskIntent.OTHER)
+        prompt = self._build_prompt(message, memories, affinity, emotion, entity_facts, conversation_history, mode, eval_mode, task_intent)
         tier_config = TierRouter.TIERS.get(tier, TierRouter.TIERS[2])
         
         logger.info(f"Calling LLM API: model={tier_config['model']}, max_tokens={tier_config['max_tokens']}")
@@ -1054,6 +1067,76 @@ class ConversationService:
         except Exception as e:
             logger.warning(f"Failed to load conversation history: {e}")
             return []
+
+    def _should_write_long_term_memory(self, message: str) -> bool:
+        m = (message or "").strip()
+        if len(m) < 4:
+            return False
+        explicit_triggers = [
+            "记得我",
+            "请记住我",
+            "帮我记住",
+            "麻烦记住",
+            "你要记住",
+        ]
+        if any(t in m for t in explicit_triggers):
+            return True
+
+        if not m.startswith("我"):
+            return False
+
+        statement_prefixes = [
+            "我喜欢", "我不喜欢", "我讨厌", "我爱", "我恨",
+            "我叫", "我是", "我住", "我在", "我来自", "我工作",
+        ]
+        return any(m.startswith(p) for p in statement_prefixes)
+
+    async def _save_conversation_turn(
+        self,
+        session_id: str,
+        user_id: str,
+        user_message: str,
+        assistant_reply: str,
+        emotion: dict,
+        affinity_score: float
+    ) -> None:
+        from sqlalchemy import text
+        from app.core.database import AsyncSessionLocal
+        import json
+
+        try:
+            async with AsyncSessionLocal() as db:
+                await db.execute(
+                    text("""
+                        INSERT INTO conversation_turns 
+                        (id, session_id, user_id, role, content, emotion_result, affinity_at_turn, created_at)
+                        VALUES (:id, :session_id, :user_id, 'user', :content, :emotion, :affinity, NOW())
+                    """),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "content": user_message,
+                        "emotion": json.dumps(emotion),
+                        "affinity": float(affinity_score)
+                    }
+                )
+                await db.execute(
+                    text("""
+                        INSERT INTO conversation_turns 
+                        (id, session_id, user_id, role, content, created_at)
+                        VALUES (:id, :session_id, :user_id, 'assistant', :content, NOW())
+                    """),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "content": assistant_reply
+                    }
+                )
+                await db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to save conversation turn: {e}")
     
     def _save_conversation_turn_background(
         self,
@@ -1093,7 +1176,7 @@ class ConversationService:
                             "user_id": user_id,
                             "content": user_message,
                             "emotion": json.dumps(emotion),
-                            "affinity": str(affinity_score)
+                            "affinity": float(affinity_score)
                         }
                     )
                     

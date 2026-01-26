@@ -3,6 +3,7 @@ import { Sender, MemoryState } from '../types';
 import type { Message } from '../types';
 import { api } from '../services/api';
 import MemoryStatus from './MemoryStatus';
+import MemeDisplay from './MemeDisplay';
 import { Send, Activity, Zap } from 'lucide-react';
 
 interface ChatInterfaceProps {
@@ -22,6 +23,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onMemoryUpdate }) => {
   const [inputText, setInputText] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const isProcessingRef = useRef(false); // 防止 StrictMode 双重调用
+  const sessionIdRef = useRef<string | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   
@@ -67,13 +69,15 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onMemoryUpdate }) => {
 
     try {
       // 3. Consume the Stream (Fast Path)
-      const stream = api.sendMessageStream(userText);
+      const stream = api.sendMessageStream(userText, sessionIdRef.current || undefined);
       let fullText = '';
       let memoryPendingId: string | null = null;
 
       for await (const event of stream) {
         // Update the AI message in place
-        if (event.type === 'text') {
+        if (event.type === 'start') {
+          if (event.session_id) sessionIdRef.current = event.session_id;
+        } else if (event.type === 'text') {
           const newContent = event.content || '';
           fullText += newContent;
           setMessages(prev => prev.map(msg => 
@@ -88,25 +92,62 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onMemoryUpdate }) => {
               memoryId: event.memory_id 
             } : msg
           ));
+        } else if (event.type === 'memory_committed') {
+          setMessages(prev => prev.map(msg => 
+            msg.id === aiMsgId ? { ...msg, memoryState: MemoryState.COMMITTED } : msg
+          ));
+          onMemoryUpdate();
         } else if (event.type === 'done') {
           setMessages(prev => prev.map(msg => 
             msg.id === aiMsgId ? { ...msg, isTyping: false } : msg
           ));
+        } else if (event.type === 'meme') {
+          const payload = event.metadata || {};
+          const meme = payload.meme || {};
+          const usageId = payload.usage_id;
+          if (meme?.id && usageId) {
+            const memeMsg: Message = {
+              id: `${aiMsgId}-meme-${Date.now()}`,
+              text: '',
+              sender: Sender.AI,
+              timestamp: Date.now(),
+              meme: {
+                memeId: String(meme.id),
+                usageId: String(usageId),
+                description: String(meme.text_description || ''),
+                imageUrl: meme.image_url,
+                reacted: null
+              }
+            };
+            setMessages(prev => [...prev, memeMsg]);
+          }
         }
       }
 
       // 4. Trigger Polling if Memory is Pending (Slow Path / Fallback)
       if (memoryPendingId) {
-          api.pollMemoryStatus(memoryPendingId, () => {
-              // Update UI to Committed
-              setMessages(prev => prev.map(msg => {
-                  if (msg.id === aiMsgId) {
-                      return { ...msg, memoryState: MemoryState.COMMITTED };
-                  }
-                  return msg;
-              }));
-              // Trigger Graph Refresh
+          api.pollMemoryStatus(memoryPendingId, {
+            onCommitted: () => {
+              setMessages(prev => prev.map(msg => (
+                msg.id === aiMsgId ? { ...msg, memoryState: MemoryState.COMMITTED } : msg
+              )));
               onMemoryUpdate();
+            },
+            onDeleted: () => {
+              setMessages(prev => prev.map(msg => (
+                msg.id === aiMsgId ? { ...msg, memoryState: MemoryState.DELETED } : msg
+              )));
+            },
+            onTimeout: () => {
+              setMessages(prev => prev.map(msg => (
+                msg.id === aiMsgId ? { ...msg, memoryState: MemoryState.NONE, memoryId: undefined } : msg
+              )));
+            },
+            onError: () => {
+              setMessages(prev => prev.map(msg => (
+                msg.id === aiMsgId ? { ...msg, memoryState: MemoryState.NONE, memoryId: undefined } : msg
+              )));
+            }
           });
       }
 
@@ -146,16 +187,37 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onMemoryUpdate }) => {
       <div className="flex-grow min-h-0 overflow-y-auto p-4 space-y-6 bg-gray-50/50">
         {messages.map((msg) => (
           <div key={msg.id} className={`flex flex-col ${msg.sender === Sender.USER ? 'items-end' : 'items-start'}`}>
-            <div 
-              className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm ${
-                msg.sender === Sender.USER 
-                  ? 'bg-blue-600 text-white rounded-br-none shadow-blue-500/20' 
-                  : 'bg-white text-gray-700 rounded-bl-none border border-gray-200'
-              }`}
-            >
-              {msg.text}
-              {msg.isTyping && <span className="inline-block w-1.5 h-3 ml-1 bg-gray-400 animate-pulse align-middle"></span>}
-            </div>
+            {msg.meme ? (
+              <div className="max-w-[85%]">
+                <MemeDisplay
+                  description={msg.meme.description}
+                  imageUrl={msg.meme.imageUrl || undefined}
+                  onFeedback={async (action) => {
+                    const usageId = msg.meme?.usageId;
+                    if (!usageId) return;
+                    if (msg.meme?.reacted) return;
+                    try {
+                      await api.submitMemeFeedback(usageId, action);
+                      setMessages(prev => prev.map(m => (
+                        m.id === msg.id ? { ...m, meme: { ...m.meme!, reacted: action } } : m
+                      )));
+                    } catch (e) {
+                    }
+                  }}
+                />
+              </div>
+            ) : (
+              <div 
+                className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm ${
+                  msg.sender === Sender.USER 
+                    ? 'bg-blue-600 text-white rounded-br-none shadow-blue-500/20' 
+                    : 'bg-white text-gray-700 rounded-bl-none border border-gray-200'
+                }`}
+              >
+                {msg.text}
+                {msg.isTyping && <span className="inline-block w-1.5 h-3 ml-1 bg-gray-400 animate-pulse align-middle"></span>}
+              </div>
+            )}
             
             {/* Memory State Indicator */}
             {msg.sender === Sender.AI && msg.memoryState && msg.memoryState !== MemoryState.NONE && (

@@ -67,7 +67,7 @@ export interface UserState {
 // --- New Types for Backend Integration ---
 
 export interface StreamEvent {
-  type: 'start' | 'text' | 'memory_pending' | 'done' | 'error' | 'meme';
+  type: 'start' | 'text' | 'memory_pending' | 'memory_committed' | 'done' | 'error' | 'meme';
   content?: string;
   session_id?: string;
   memory_id?: string;
@@ -94,4 +94,10 @@ export interface ProactivePreferences {
   proactive_enabled: boolean;
   morning_greeting_enabled: boolean;
   evening_greeting_enabled: boolean;
-  silence_reminder_
+  silence_reminder_enabled: boolean;
+  quiet_hours_start: string;
+  quiet_hours_end: string;
+  max_messages_per_day: number;
+  preferred_morning_time: string;
+  preferred_evening_time: string;
+}

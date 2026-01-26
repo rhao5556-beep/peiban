@@ -447,7 +447,7 @@ export const api = {
    * 2.1 & 2.2 Streaming Message (Fast Path)
    * Endpoint: /api/v1/sse/message
    */
-  sendMessageStream: async function* (text: string): AsyncGenerator<StreamEvent> {
+  sendMessageStream: async function* (text: string, sessionId?: string): AsyncGenerator<StreamEvent> {
     if (USE_MOCK_DATA) {
       // Mock Stream Generator
       yield { type: 'start', session_id: 'mock_session_123' };
@@ -482,7 +482,7 @@ export const api = {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
-      body: JSON.stringify({ message: text })
+      body: JSON.stringify(sessionId ? { message: text, session_id: sessionId } : { message: text })
     });
 
     if (!response.body) throw new Error("No response body");
@@ -534,10 +534,18 @@ export const api = {
    * 4.3 Polling Memory Status (Slow Path / Fallback)
    * Endpoint: /api/v1/memories/{id}
    */
-  pollMemoryStatus: (memoryId: string, onCommitted: () => void) => {
+  pollMemoryStatus: (
+    memoryId: string,
+    handlers: {
+      onCommitted: () => void;
+      onDeleted?: () => void;
+      onTimeout?: () => void;
+      onError?: (error: unknown) => void;
+    }
+  ) => {
     if (USE_MOCK_DATA) {
       setTimeout(() => {
-        onCommitted();
+        handlers.onCommitted();
       }, 3000);
       return;
     }
@@ -550,6 +558,7 @@ export const api = {
     const tick = async () => {
       if (Date.now() - start > timeout) {
         console.warn(`Polling timeout for memory ${memoryId}`);
+        handlers.onTimeout?.();
         return;
       }
 
@@ -562,14 +571,19 @@ export const api = {
         if (res.ok) {
             const data: MemoryStatusResponse = await res.json();
             if (data.status === 'committed') {
-              onCommitted();
+              handlers.onCommitted();
               return;
             } else if (data.status === 'deleted') {
+                handlers.onDeleted?.();
                 return; 
             }
+        } else if (res.status === 404) {
+            handlers.onDeleted?.();
+            return;
         }
       } catch (e) {
         console.error("Polling error", e);
+        handlers.onError?.(e);
       }
 
       setTimeout(tick, delay);
