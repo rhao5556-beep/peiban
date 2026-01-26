@@ -13,3 +13,4 @@
 [submodule "external/openai-evals"]
 	path = external/openai-evals
 	url = https://github.com/openai/evals.git
+	ignore = dirty
