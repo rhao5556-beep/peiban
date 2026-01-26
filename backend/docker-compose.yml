@@ -1,0 +1,274 @@
+name: affinity
+
+services:
+  # PostgreSQL - 用户数据、会话管理、Outbox
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: affinity-postgres
+    environment:
+      POSTGRES_USER: affinity
+      POSTGRES_PASSWORD: affinity_secret
+      POSTGRES_DB: affinity
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U affinity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Neo4j - 记忆图谱存储
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: affinity-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/neo4j_secret
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Milvus - 向量数据库
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: affinity-etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: affinity-minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9001:9001"
+      - "9000:9000"
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  milvus:
+    image: milvusdb/milvus:v2.5.2
+    container_name: affinity-milvus
+    command: ["milvus", "run", "standalone"]
+    init: true
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      - etcd
+      - minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+
+  # Redis - 缓存 + 消息队列 (Celery Broker)
+  redis:
+    image: redis:7-alpine
+    container_name: affinity-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Celery Worker - 异步任务处理
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: affinity-celery-worker
+    command: >
+      sh -c "pip install --no-cache-dir feedparser==6.0.11 circuitbreaker==2.0.0 &&
+             celery -A app.worker worker --loglevel=info --concurrency=4 -Q celery,default,high_priority,low_priority,maintenance,content,meme"
+    environment:
+      - DATABASE_URL=postgresql://affinity:affinity_secret@postgres:5432/affinity
+      - REDIS_URL=redis://redis:6379/0
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=neo4j_secret
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-https://api.siliconflow.cn/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-deepseek-ai/DeepSeek-V3}
+    depends_on:
+      - postgres
+      - redis
+      - neo4j
+      - milvus
+    volumes:
+      - ./app:/app/app
+
+  # Celery Beat - 定时任务调度
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: affinity-celery-beat
+    command: >
+      sh -c "pip install --no-cache-dir feedparser==6.0.11 circuitbreaker==2.0.0 &&
+             celery -A app.worker beat --loglevel=info"
+    environment:
+      - DATABASE_URL=postgresql://affinity:affinity_secret@postgres:5432/affinity
+      - REDIS_URL=redis://redis:6379/0
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=neo4j_secret
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-https://api.siliconflow.cn/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-deepseek-ai/DeepSeek-V3}
+    depends_on:
+      - redis
+      - celery-worker
+    volumes:
+      - ./app:/app/app
+
+  # Flower - Celery 监控面板
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: affinity-flower
+    command: celery -A app.worker flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - celery-worker
+
+  # FastAPI 应用
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: affinity-api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://affinity:affinity_secret@postgres:5432/affinity
+      - REDIS_URL=redis://redis:6379/0
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=neo4j_secret
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - JWT_SECRET=${JWT_SECRET:-your-secret-key}
+    depends_on:
+      - postgres
+      - redis
+      - neo4j
+      - milvus
+    volumes:
+      - ./app:/app/app
+
+  # Prometheus - 指标收集
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: affinity-prometheus
+    user: "0:0"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    depends_on:
+      - api
+
+  # Grafana - 可视化面板
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: affinity-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+    depends_on:
+      - prometheus
+
+  # Redis Exporter - Redis 指标导出
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.55.0
+    container_name: affinity-redis-exporter
+    ports:
+      - "9121:9121"
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+    depends_on:
+      - redis
+
+  # Postgres Exporter - PostgreSQL 指标导出
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.14.0
+    container_name: affinity-postgres-exporter
+    user: "0:0"
+    ports:
+      - "9187:9187"
+    environment:
+      - DATA_SOURCE_NAME=postgresql://affinity:affinity_secret@postgres:5432/affinity?sslmode=disable
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  neo4j_logs:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

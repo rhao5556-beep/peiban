@@ -1,0 +1,81 @@
+# Prometheus 告警规则
+groups:
+  - name: affinity_alerts
+    rules:
+      # Outbox 延迟告警
+      - alert: OutboxLagHigh
+        expr: affinity_outbox_lag_ms{quantile="0.95"} > 30000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox P95 延迟超过 30s"
+          description: "Outbox P95 延迟为 {{ $value }}ms，超过 SLO 阈值 30000ms"
+
+      - alert: OutboxLagWarning
+        expr: affinity_outbox_lag_ms{quantile="0.5"} > 2000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox P50 延迟超过 2s"
+          description: "Outbox P50 延迟为 {{ $value }}ms，超过 SLO 阈值 2000ms"
+
+      # DLQ 积压告警
+      - alert: DLQBacklog
+        expr: affinity_dlq_count > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "死信队列有积压"
+          description: "DLQ 中有 {{ $value }} 条消息待处理"
+
+      - alert: DLQBacklogCritical
+        expr: affinity_dlq_count > 100
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "死信队列严重积压"
+          description: "DLQ 中有 {{ $value }} 条消息，需要立即处理"
+
+      # Outbox 积压告警
+      - alert: OutboxStale
+        expr: affinity_outbox_stale_count > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox 有过期事件"
+          description: "有 {{ $value }} 个 Outbox 事件超过 30 秒未处理"
+
+      # 数据不一致告警
+      - alert: DataMismatchHigh
+        expr: (affinity_memories_total{status="pending"} / affinity_memories_total{status="committed"}) > 0.01
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "数据不一致率超过 1%"
+          description: "Pending 记忆占比过高，可能存在数据不一致"
+
+      # API 健康告警
+      - alert: APIUnhealthy
+        expr: up{job="affinity-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Affinity API 服务不可用"
+          description: "API 服务已停止响应"
+
+      # Celery Worker 告警
+      - alert: CeleryWorkerDown
+        expr: flower_worker_online == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Celery Worker 离线"
+          description: "没有在线的 Celery Worker"

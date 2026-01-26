@@ -1,0 +1,5 @@
+{
+  "name": "AI Companion Interface",
+  "description": "A visualized AI companion interface with real-time knowledge graph evolution, memory state tracking, and affinity analysis.",
+  "requestFramePermissions": []
+}

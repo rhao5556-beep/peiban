@@ -1,0 +1,61 @@
+# FastAPI & Web
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+sse-starlette==1.8.2
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Database - PostgreSQL
+sqlalchemy==2.0.25
+asyncpg==0.29.0
+psycopg2-binary==2.9.9
+alembic==1.13.1
+pgvector==0.2.4
+
+# Database - Neo4j
+neo4j==5.16.0
+
+# Database - Milvus
+pymilvus==2.5.0
+marshmallow>=3.18.0,<3.21.0
+environs==9.5.0
+
+# Redis & Celery
+redis==5.0.1
+celery[redis]==5.3.6
+flower==2.0.1
+
+# AI/ML - 使用云端 API，无需本地模型
+openai==1.10.0
+numpy>=1.24.0
+
+# Utilities
+pydantic==2.5.3
+pydantic-settings==2.1.0
+python-dotenv>=1.0.1
+httpx==0.26.0
+tenacity==8.2.3
+structlog==24.1.0
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+hypothesis==6.92.2
+schemathesis==3.22.0
+locust==2.20.1
+faker==22.2.0
+
+# Monitoring
+prometheus-client==0.19.0
+
+# Code Quality
+ruff==0.1.14
+black==24.1.1
+isort==5.13.2
+
+# Content Recommendation
+feedparser==6.0.11
+bilibili-api-python==16.1.0
+circuitbreaker==2.0.0
