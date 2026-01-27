@@ -59,8 +59,6 @@ class TestConversation:
         assert "session_id" in data
         assert "emotion" in data
         assert "affinity" in data
-        assert "context_source" in data
-        assert "web_search_count" in data["context_source"]
     
     @pytest.mark.asyncio
     async def test_send_message_unauthorized(self, client: AsyncClient):

@@ -1,4 +1,4 @@
-import type { GraphData, AffinityPoint, StreamEvent, MemoryStatusResponse } from '../types';
+import type { Message, Sender, MemoryState, GraphData, AffinityPoint, StreamEvent, MemoryStatusResponse } from '../types';
 import { MOCK_GRAPH_DATA_DAY_1, MOCK_GRAPH_DATA_DAY_15, MOCK_GRAPH_DATA_DAY_30, MOCK_AFFINITY_HISTORY } from '../constants';
 
 // ============================================================================
@@ -9,8 +9,7 @@ import { MOCK_GRAPH_DATA_DAY_1, MOCK_GRAPH_DATA_DAY_15, MOCK_GRAPH_DATA_DAY_30, 
 const USE_MOCK_DATA = false; 
 
 // 2. 更新为后端 v1 接口地址
-const normalizeBaseUrl = (value: string) => value.replace(/\/+$/, '');
-const API_BASE_URL = normalizeBaseUrl((import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '/api/v1'); 
+const API_BASE_URL = 'http://localhost:8000/api/v1'; 
 
 // 3. 动态获取 Token
 let cachedToken: string | null = null;
@@ -36,14 +35,13 @@ const getToken = async (): Promise<string> => {
     });
     if (response.ok) {
       const data = await response.json();
-      const token = (data?.access_token as string | undefined) ?? '';
-      cachedToken = token || null;
+      cachedToken = data.access_token;
       // 保存 user_id 到 localStorage
       if (data.user_id && !cachedUserId) {
         cachedUserId = data.user_id;
         localStorage.setItem(STORAGE_KEY, data.user_id);
       }
-      return token;
+      return cachedToken;
     }
   } catch (e) {
     console.error('Failed to get token', e);
@@ -59,32 +57,37 @@ const adaptBackendGraph = (backendData: any): GraphData => {
   
   // 关系类型中文映射
   const relationLabels: Record<string, string> = {
-    'knows': '认识',
-    'likes': '喜欢',
-    'dislikes': '讨厌',
-    'visited': '去过',
-    'related': '相关'
+    'KNOWS': '认识',
+    'LIKES': '喜欢',
+    'DISLIKES': '讨厌',
+    'VISITED': '去过',
+    'RELATES_TO': '相关',
+    'FAMILY': '家人',
+    'FRIEND': '朋友',
+    'COLLEAGUE': '同事',
+    'CONCERN': '关心'
   };
   
   return {
     nodes: backendData.nodes.map((n: any) => ({
-      id: n.id,
-      label: n.name || n.label, 
-      type: n.type,
-      weight: n.mention_count || n.weight || 10,
-      properties: n
+      // 保留所有后端属性
+      ...n,
+      // 添加前端需要的映射字段
+      label: n.name || n.label,
+      weight: n.mention_count || n.weight || 10
     })),
     edges: backendData.edges.map((e: any) => {
-      const weight = e.current_weight || e.weight || 1;
+      const weight = e.current_weight !== undefined ? e.current_weight : (e.weight || 1);
       const weightPercent = Math.round(weight * 100);
       const relationLabel = relationLabels[e.relation_type] || e.relation_type || 'related';
       return {
-        id: e.id,
+        // 保留所有后端属性
+        ...e,
+        // 添加前端需要的映射字段
         source: e.source_id || e.source,
         target: e.target_id || e.target,
         label: `${relationLabel} (${weightPercent}%)`,  // 显示关系类型和权重百分比
-        weight: weight,
-        properties: e
+        weight: weight
       };
     })
   };
@@ -116,149 +119,6 @@ export const api = {
       console.error("Failed to fetch graph", e);
       return { nodes: [], edges: [] };
     }
-  },
-
-  getDashboard: async () => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/affinity/dashboard`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
-  },
-
-  getMemories: async (limit = 50) => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/memories/?limit=${limit}`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
-  },
-
-  getMemory: async (memoryId: string) => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/memories/${memoryId}`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
-  },
-
-  deleteMemories: async (ids: string[]) => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/memories/`, {
-      method: 'DELETE',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
-      },
-      body: JSON.stringify({ memory_ids: ids })
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
-  },
-
-  deleteAllMemories: async () => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/memories/`, {
-      method: 'DELETE',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
-      },
-      body: JSON.stringify({ delete_all: true })
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
-  },
-
-  getContentRecommendations: async () => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/content/recommendations`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    return (data || []).map((r: any) => ({
-      id: r.id,
-      contentId: r.content_id,
-      title: r.title,
-      summary: r.summary ?? null,
-      url: r.url,
-      source: r.source,
-      tags: r.tags || [],
-      publishedAt: r.published_at ?? null,
-      matchScore: r.match_score ?? 0,
-      rankPosition: r.rank_position ?? 0,
-      recommendedAt: r.recommended_at,
-      clickedAt: r.clicked_at ?? null,
-      feedback: r.feedback ?? null
-    }));
-  },
-
-  submitRecommendationFeedback: async (recommendationId: string, action: 'clicked' | 'liked' | 'disliked' | 'ignored') => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/content/recommendations/${recommendationId}/feedback`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
-      },
-      body: JSON.stringify({ action })
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
-  },
-
-  getContentPreference: async () => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/content/preference`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const p = await res.json();
-    return {
-      enabled: true,
-      daily_limit: p.max_daily_recommendations ?? 1,
-      preferred_sources: p.preferred_sources || [],
-      quiet_hours_start: p.quiet_hours_start || null,
-      quiet_hours_end: p.quiet_hours_end || null
-    };
-  },
-
-  updateContentPreference: async (pref: {
-    enabled: boolean;
-    daily_limit: number;
-    preferred_sources: string[];
-    quiet_hours_start: string | null;
-    quiet_hours_end: string | null;
-  }) => {
-    const token = await getToken();
-    const payload: any = {
-      content_recommendation_enabled: true,
-      max_daily_recommendations: pref.daily_limit,
-      preferred_sources: pref.preferred_sources
-    };
-    if (pref.quiet_hours_start !== undefined) payload.quiet_hours_start = pref.quiet_hours_start;
-    if (pref.quiet_hours_end !== undefined) payload.quiet_hours_end = pref.quiet_hours_end;
-    const res = await fetch(`${API_BASE_URL}/content/preference`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
-      },
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const p = await res.json();
-    return {
-      enabled: !!p.content_recommendation_enabled,
-      daily_limit: p.max_daily_recommendations ?? 1,
-      preferred_sources: p.preferred_sources || [],
-      quiet_hours_start: p.quiet_hours_start || null,
-      quiet_hours_end: p.quiet_hours_end || null
-    };
   },
 
   /**
@@ -333,17 +193,12 @@ export const api = {
       body: JSON.stringify({ message: text })
     });
 
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
     if (!response.body) throw new Error("No response body");
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
     const processedEvents = new Set<string>(); // 去重：防止重复处理相同事件
-    let shouldStop = false;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -360,14 +215,11 @@ export const api = {
         if (!trimmedLine) continue;
         
         // SSE 标准格式：data: {...}
-        if (!trimmedLine.startsWith('data:')) continue;
-        const cleanLine = trimmedLine.slice(5).trimStart();
+        if (!trimmedLine.startsWith('data: ')) continue;
+        const cleanLine = trimmedLine.slice(6);
 
         try {
-            if (cleanLine === '[DONE]') {
-              shouldStop = true;
-              break;
-            }
+            if (cleanLine === '[DONE]') break;
             
             // 去重检查：使用事件内容作为唯一标识
             const eventKey = cleanLine;
@@ -383,39 +235,7 @@ export const api = {
             console.warn("Stream parse error", e, line);
         }
       }
-      if (shouldStop) break;
     }
-  },
-
-  getMemePreferences: async () => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/memes/preferences`, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
-  },
-
-  updateMemePreferences: async (payload: { meme_enabled: boolean }) => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/memes/preferences`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
-  },
-
-  submitMemeFeedback: async (usageId: string, action: 'liked' | 'disliked' | 'ignored') => {
-    const token = await getToken();
-    const res = await fetch(`${API_BASE_URL}/memes/feedback`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ usage_id: usageId, reaction: action })
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
   },
 
   /**
@@ -465,5 +285,388 @@ export const api = {
     };
 
     tick();
+  },
+
+  /**
+   * Get Dashboard Data
+   * Endpoint: /api/v1/affinity/dashboard
+   */
+  getDashboard: async (): Promise<any> => {
+    if (USE_MOCK_DATA) {
+      await new Promise(resolve => setTimeout(resolve, 300));
+      return {
+        relationship: {
+          state: 'friend',
+          state_display: '朋友',
+          score: 0.55,
+          score_raw: 0.55,
+          hearts: '💙💙💙'
+        },
+        days_known: 30,
+        memories: { count: 15, can_view_details: true },
+        top_topics: [
+          { topic: '编程', count: 8 },
+          { topic: '咖啡', count: 5 },
+          { topic: 'AI', count: 3 }
+        ],
+        emotion_trend: [
+          { date: '第1天', score: 10 },
+          { date: '第15天', score: 35 },
+          { date: '第30天', score: 55 }
+        ],
+        feedback: { likes: 12, dislikes: 2, saves: 5, favorites: 5 },
+        health_reminder: null
+      };
+    }
+
+    try {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/affinity/dashboard`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      return await response.json();
+    } catch (e) {
+      console.error("Failed to fetch dashboard", e);
+      throw e;
+    }
+  },
+
+  /**
+   * Get Memories List
+   * Endpoint: /api/v1/memories?limit=X
+   */
+  getMemories: async (limit: number): Promise<any[]> => {
+    if (USE_MOCK_DATA) {
+      await new Promise(resolve => setTimeout(resolve, 300));
+      return [
+        {
+          id: 'mem_1',
+          content: '小明喜欢喝咖啡',
+          valence: 0.8,
+          status: 'committed',
+          created_at: new Date(Date.now() - 86400000 * 29).toISOString(),
+          committed_at: new Date(Date.now() - 86400000 * 29).toISOString()
+        },
+        {
+          id: 'mem_2',
+          content: '小明是一名程序员',
+          valence: 0.6,
+          status: 'committed',
+          created_at: new Date(Date.now() - 86400000 * 28).toISOString(),
+          committed_at: new Date(Date.now() - 86400000 * 28).toISOString()
+        },
+        {
+          id: 'mem_3',
+          content: '小明经常深夜工作',
+          valence: -0.2,
+          status: 'committed',
+          created_at: new Date(Date.now() - 86400000 * 15).toISOString(),
+          committed_at: new Date(Date.now() - 86400000 * 15).toISOString()
+        },
+        {
+          id: 'mem_4',
+          content: '小明成功完成了项目上线',
+          valence: 0.9,
+          status: 'committed',
+          created_at: new Date(Date.now() - 86400000 * 2).toISOString(),
+          committed_at: new Date(Date.now() - 86400000 * 2).toISOString()
+        },
+        {
+          id: 'mem_5',
+          content: '小明对 AI 助手建立了信任',
+          valence: 0.95,
+          status: 'committed',
+          created_at: new Date(Date.now() - 86400000).toISOString(),
+          committed_at: new Date(Date.now() - 86400000).toISOString()
+        }
+      ];
+    }
+
+    try {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/memories?limit=${limit}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      return await response.json();
+    } catch (e) {
+      console.error("Failed to fetch memories", e);
+      throw e;
+    }
+  },
+
+  /**
+   * Get Single Memory Detail
+   * Endpoint: /api/v1/memories/{id}
+   */
+  getMemory: async (memoryId: string): Promise<any> => {
+    if (USE_MOCK_DATA) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      return {
+        id: memoryId,
+        content: '这是一条详细的记忆内容',
+        valence: 0.7,
+        status: 'committed',
+        created_at: new Date(Date.now() - 86400000).toISOString(),
+        committed_at: new Date(Date.now() - 86400000).toISOString()
+      };
+    }
+
+    try {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/memories/${memoryId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      return await response.json();
+    } catch (e) {
+      console.error("Failed to fetch memory", e);
+      throw e;
+    }
+  },
+
+  /**
+   * Delete Multiple Memories
+   * Endpoint: DELETE /api/v1/memories
+   */
+  deleteMemories: async (memoryIds: string[]): Promise<void> => {
+    if (USE_MOCK_DATA) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      console.log('Mock: Deleted memories', memoryIds);
+      return;
+    }
+
+    try {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/memories`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ memory_ids: memoryIds })
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    } catch (e) {
+      console.error("Failed to delete memories", e);
+      throw e;
+    }
+  },
+
+  /**
+   * Delete All Memories
+   * Endpoint: DELETE /api/v1/memories/all
+   */
+  deleteAllMemories: async (): Promise<void> => {
+    if (USE_MOCK_DATA) {
+      await new Promise(resolve => setTimeout(resolve, 800));
+      console.log('Mock: Deleted all memories');
+      return;
+    }
+
+    try {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/memories/all`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    } catch (e) {
+      console.error("Failed to delete all memories", e);
+      throw e;
+    }
+  },
+
+  /**
+   * Content Recommendation: Get user preference
+   * Endpoint: GET /api/v1/content/preference
+   */
+  getContentPreference: async () => {
+    if (USE_MOCK_DATA) {
+      return {
+        enabled: false,
+        daily_limit: 1,
+        preferred_sources: [],
+        quiet_hours_start: '22:00',
+        quiet_hours_end: '08:00'
+      };
+    }
+
+    try {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/content/preference`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      
+      // 转换后端字段名到前端格式
+      return {
+        enabled: data.content_recommendation_enabled,
+        daily_limit: data.max_daily_recommendations,
+        preferred_sources: data.preferred_sources || [],
+        quiet_hours_start: data.quiet_hours_start,
+        quiet_hours_end: data.quiet_hours_end
+      };
+    } catch (e) {
+      console.error("Failed to get content preference", e);
+      throw e;
+    }
+  },
+
+  /**
+   * Content Recommendation: Update user preference
+   * Endpoint: PUT /api/v1/content/preference
+   */
+  updateContentPreference: async (preference: {
+    enabled?: boolean;
+    daily_limit?: number;
+    preferred_sources?: string[];
+    quiet_hours_start?: string | null;
+    quiet_hours_end?: string | null;
+  }) => {
+    if (USE_MOCK_DATA) {
+      return {
+        enabled: preference.enabled ?? false,
+        daily_limit: preference.daily_limit ?? 1,
+        preferred_sources: preference.preferred_sources ?? [],
+        quiet_hours_start: preference.quiet_hours_start ?? '22:00',
+        quiet_hours_end: preference.quiet_hours_end ?? '08:00'
+      };
+    }
+
+    try {
+      const token = await getToken();
+      
+      // 转换前端字段名到后端格式
+      const payload: any = {};
+      if (preference.enabled !== undefined) {
+        payload.content_recommendation_enabled = preference.enabled;
+      }
+      if (preference.daily_limit !== undefined) {
+        payload.max_daily_recommendations = preference.daily_limit;
+      }
+      if (preference.preferred_sources !== undefined) {
+        payload.preferred_sources = preference.preferred_sources;
+      }
+      if (preference.quiet_hours_start !== undefined) {
+        payload.quiet_hours_start = preference.quiet_hours_start;
+      }
+      if (preference.quiet_hours_end !== undefined) {
+        payload.quiet_hours_end = preference.quiet_hours_end;
+      }
+      
+      const response = await fetch(`${API_BASE_URL}/content/preference`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(payload)
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      
+      // 转换后端字段名到前端格式
+      return {
+        enabled: data.content_recommendation_enabled,
+        daily_limit: data.max_daily_recommendations,
+        preferred_sources: data.preferred_sources || [],
+        quiet_hours_start: data.quiet_hours_start,
+        quiet_hours_end: data.quiet_hours_end
+      };
+    } catch (e) {
+      console.error("Failed to update content preference", e);
+      throw e;
+    }
+  },
+
+  /**
+   * Content Recommendation: Get today's recommendations
+   * Endpoint: GET /api/v1/content/recommendations
+   */
+  getContentRecommendations: async () => {
+    if (USE_MOCK_DATA) {
+      return [];
+    }
+
+    try {
+      const token = await getToken();
+      const response = await fetch(`${API_BASE_URL}/content/recommendations`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      
+      // 转换后端字段名到前端格式
+      return data.map((item: any) => ({
+        id: item.id,
+        contentId: item.content_id,
+        title: item.title,
+        summary: item.summary,
+        url: item.url,
+        source: item.source,
+        tags: item.tags || [],
+        publishedAt: item.published_at,
+        matchScore: item.match_score,
+        rankPosition: item.rank_position,
+        recommendedAt: item.recommended_at,
+        clickedAt: item.clicked_at,
+        feedback: item.feedback
+      }));
+    } catch (e) {
+      console.error("Failed to get content recommendations", e);
+      throw e;
+    }
+  },
+
+  /**
+   * Content Recommendation: Submit feedback
+   * Endpoint: POST /api/v1/content/recommendations/{id}/feedback
+   */
+  submitRecommendationFeedback: async (
+    recommendationId: string,
+    action: 'clicked' | 'liked' | 'disliked' | 'ignored'
+  ) => {
+    if (USE_MOCK_DATA) {
+      return { success: true, message: 'Feedback recorded' };
+    }
+
+    try {
+      const token = await getToken();
+      const response = await fetch(
+        `${API_BASE_URL}/content/recommendations/${recommendationId}/feedback`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({ action })
+        }
+      );
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      return await response.json();
+    } catch (e) {
+      console.error("Failed to submit feedback", e);
+      throw e;
+    }
   }
 };

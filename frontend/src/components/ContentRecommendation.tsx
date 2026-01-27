@@ -30,6 +30,7 @@ export const ContentRecommendation: React.FC = () => {
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isEnabled, setIsEnabled] = useState<boolean | null>(null);
 
   useEffect(() => {
     fetchData();
@@ -41,11 +42,13 @@ export const ContentRecommendation: React.FC = () => {
     
     try {
       // 同时获取推荐列表和用户偏好
-      const [recsData] = await Promise.all([
-        api.getContentRecommendations()
+      const [recsData, prefData] = await Promise.all([
+        api.getContentRecommendations(),
+        api.getContentPreference()
       ]);
       
       setRecommendations(recsData);
+      setIsEnabled(prefData.enabled);
     } catch (err: any) {
       console.error('Failed to fetch data:', err);
       
@@ -158,7 +161,11 @@ export const ContentRecommendation: React.FC = () => {
         <h2 className="text-xl font-semibold mb-4">今日推荐</h2>
         <div className="bg-gray-50 border border-gray-200 rounded-lg p-8 text-center">
           <p className="text-gray-500">暂无推荐内容</p>
-          <p className="text-sm text-gray-400 mt-2">系统正在为您准备推荐内容，请稍后查看</p>
+          <p className="text-sm text-gray-400 mt-2">
+            {isEnabled === false 
+              ? '请在设置中启用内容推荐功能' 
+              : '系统正在为您准备推荐内容，请稍后查看'}
+          </p>
         </div>
       </div>
     );

@@ -1,19 +1,14 @@
 """混合检索服务 - Vector + Graph + Entity Facts"""
-import contextvars
 import math
 import logging
 import json
-import re
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
 from datetime import datetime
-from sqlalchemy import text
 from openai import AsyncOpenAI
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
-
-EVAL_MODE_CTX: contextvars.ContextVar[bool] = contextvars.ContextVar("affinity_eval_mode", default=False)
 
 
 @dataclass
@@ -98,12 +93,6 @@ class EmbeddingService:
             向量列表
         """
         start_time = datetime.now()
-
-        if EVAL_MODE_CTX.get():
-            return self._encode_local(text)
-
-        if not settings.OPENAI_API_KEY:
-            return [0.0] * 1024
         
         # 尝试从缓存获取
         if use_cache:
@@ -134,21 +123,6 @@ class EmbeddingService:
             logger.error(f"Cloud embedding failed: {e}")
             # 返回零向量作为 fallback (1024维是 bge-m3 的输出维度)
             return [0.0] * 1024
-
-    def _encode_local(self, text: str, dim: int = 1024) -> List[float]:
-        import hashlib
-        vec = [0.0] * dim
-        s = (text or "").lower()
-        tokens = re.findall(r"[a-z0-9]+", s)
-        if not tokens:
-            return vec
-        for tok in tokens:
-            h = hashlib.md5(tok.encode("utf-8")).digest()
-            idx = int.from_bytes(h[:4], "little") % dim
-            sign = -1.0 if (h[4] & 1) else 1.0
-            vec[idx] += sign
-        norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-        return [v / norm for v in vec]
     
     async def _get_cached_embedding(self, text: str) -> Optional[List[float]]:
         """从缓存获取 embedding"""
@@ -192,9 +166,6 @@ class EmbeddingService:
         Returns:
             向量列表的列表
         """
-        if EVAL_MODE_CTX.get():
-            return [self._encode_local(t) for t in texts]
-
         if use_cache:
             # 检查缓存，分离已缓存和未缓存的文本
             results = [None] * len(texts)
@@ -238,8 +209,6 @@ class EmbeddingService:
                 return results
         
         # 不使用缓存，直接批量编码
-        if not settings.OPENAI_API_KEY:
-            return [[0.0] * 1024 for _ in texts]
         try:
             response = await self.client.embeddings.create(
                 input=texts,
@@ -361,14 +330,12 @@ class RetrievalService:
         top_k: int = 50
     ) -> List[Memory]:
         """向量检索"""
-        if EVAL_MODE_CTX.get():
-            return await self._db_eval_vector_search(user_id, query, limit=top_k)
-
         # 1. 编码查询文本
         query_embedding = await self.embedding_service.encode(query)
         
-        if self.milvus is None:
-            return await self._db_fallback_search(user_id, query, limit=top_k)
+        if not self.milvus:
+            logger.warning("Milvus client not initialized, returning empty results")
+            return []
         
         try:
             # 2. 搜索相似向量
@@ -428,108 +395,11 @@ class RetrievalService:
                         continue
             
             logger.info(f"Vector search returned {len(memories)} candidates")
-            if not memories:
-                return await self._db_fallback_search(user_id, query, limit=top_k)
             return memories
             
         except Exception as e:
             logger.error(f"Vector search failed: {e}")
-            return await self._db_fallback_search(user_id, query, limit=top_k)
-
-    async def _db_eval_vector_search(self, user_id: str, query: str, limit: int = 50) -> List[Memory]:
-        if not self.db:
             return []
-        q = (query or "").strip()
-        if not q:
-            return []
-        pool_size = max(500, min(4000, int(limit) * 200))
-        try:
-            result = await self.db.execute(
-                text("""
-                    SELECT id::text, content, created_at AS ts
-                    FROM memories
-                    WHERE user_id::text = :user_id
-                      AND status IN ('pending', 'committed')
-                    ORDER BY created_at DESC
-                    LIMIT :limit
-                """),
-                {"user_id": user_id, "limit": int(pool_size)},
-            )
-            rows = result.fetchall()
-        except Exception:
-            return []
-
-        query_vec = self.embedding_service._encode_local(q)
-        scored: list[tuple[float, str, str, datetime]] = []
-        for mid, content, ts in rows:
-            text_content = content or ""
-            if not text_content:
-                continue
-            created_at = ts if isinstance(ts, datetime) else datetime.now()
-            mem_vec = self.embedding_service._encode_local(text_content)
-            sim = 0.0
-            for a, b in zip(query_vec, mem_vec):
-                sim += a * b
-            scored.append((sim, str(mid), text_content, created_at))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        out: List[Memory] = []
-        for sim, mid, content, created_at in scored[: int(limit)]:
-            out.append(
-                Memory(
-                    id=mid,
-                    content=content,
-                    cosine_sim=float(sim),
-                    valence=0.0,
-                    created_at=created_at,
-                    recency_score=self._calculate_recency(created_at),
-                )
-            )
-        return out
-
-    async def _db_fallback_search(self, user_id: str, query: str, limit: int = 50) -> List[Memory]:
-        if not self.db:
-            return []
-        q = (query or "").strip()
-        keyword = ""
-        m = re.match(r"(?i)^when did\\s+([A-Za-z][A-Za-z'\\-]*)\\b", q)
-        if m:
-            keyword = m.group(1)
-        if not keyword:
-            m2 = re.search(r"([A-Za-z]{3,})", q)
-            if m2:
-                keyword = m2.group(1)
-        like = f"%{keyword}%" if keyword else "%"
-        try:
-            result = await self.db.execute(
-                text("""
-                    SELECT id::text, content, created_at AS ts
-                    FROM memories
-                    WHERE user_id::text = :user_id
-                      AND content ILIKE :like
-                      AND status IN ('pending', 'committed')
-                    ORDER BY created_at DESC
-                    LIMIT :limit
-                """),
-                {"user_id": user_id, "like": like, "limit": int(limit)}
-            )
-            rows = result.fetchall()
-        except Exception:
-            return []
-        out: List[Memory] = []
-        for mid, content, ts in rows:
-            created_at = ts if isinstance(ts, datetime) else datetime.now()
-            out.append(
-                Memory(
-                    id=str(mid),
-                    content=content or "",
-                    cosine_sim=0.0,
-                    valence=0.0,
-                    created_at=created_at,
-                    recency_score=self._calculate_recency(created_at),
-                )
-            )
-        return out
     
     async def _graph_expand(
         self,
@@ -788,7 +658,8 @@ class RetrievalService:
                     # 查找实体节点（模糊匹配名称）
                     find_entity_query = """
                     MATCH (e {user_id: $user_id})
-                    WHERE e.name CONTAINS $entity_name OR $entity_name CONTAINS e.name
+                    WHERE toLower(e.name) CONTAINS toLower($entity_name) 
+                       OR toLower($entity_name) CONTAINS toLower(e.name)
                     RETURN e.id AS entity_id, e.name AS entity_name, labels(e) AS labels
                     LIMIT 5
                     """
@@ -823,6 +694,7 @@ class RetrievalService:
                         WHERE NOT target:User
                         RETURN e.name AS source_name, type(r) AS relation_type, 
                                target.name AS target_name, r.desc AS description,
+                               r.time_iso AS time_iso, r.time_epoch_ms AS time_epoch_ms,
                                coalesce(r.weight, 0.5) AS weight,
                                1 AS hop_distance
                         """
@@ -838,6 +710,8 @@ class RetrievalService:
                                 "relation": rec["relation_type"],
                                 "target": rec["target_name"],
                                 "description": rec["description"],
+                                "time_iso": rec.get("time_iso"),
+                                "time_epoch_ms": rec.get("time_epoch_ms"),
                                 "weight": rec["weight"],
                                 "hop": 1,
                                 "path_type": "direct"
@@ -849,6 +723,7 @@ class RetrievalService:
                         WHERE NOT source:User
                         RETURN source.name AS source_name, type(r) AS relation_type,
                                e.name AS target_name, r.desc AS description,
+                               r.time_iso AS time_iso, r.time_epoch_ms AS time_epoch_ms,
                                coalesce(r.weight, 0.5) AS weight,
                                1 AS hop_distance
                         """
@@ -864,6 +739,8 @@ class RetrievalService:
                                 "relation": rec["relation_type"],
                                 "target": rec["target_name"],
                                 "description": rec["description"],
+                                "time_iso": rec.get("time_iso"),
+                                "time_epoch_ms": rec.get("time_epoch_ms"),
                                 "weight": rec["weight"],
                                 "hop": 1,
                                 "path_type": "direct"
@@ -1140,22 +1017,25 @@ class RetrievalService:
                 messages=[
                     {
                         "role": "system",
-                        "content": """你是一个实体识别器。从用户的问题中提取被询问的实体名称。
+                        "content": """You are an entity recognizer. Extract entity names mentioned in the user's question.
 
-规则：
-1. 提取问题中明确提到的人名、地名、事物名
-2. 返回 JSON 数组格式，如 ["二丫", "足球"]
-3. 如果没有明确实体，返回空数组 []
-4. 不要添加问题中没有的实体
-5. 对于语义概念查询（如"海边"、"南方"），也提取这些概念词
+Rules:
+1) Support both Chinese and English questions.
+2) Extract explicitly mentioned entities: people, locations, organizations, things, events.
+3) Return a JSON array of strings, e.g. ["Caroline", "Melanie"] or ["昊哥", "大连"].
+4) If no clear entity, return [].
+5) Do not invent entities not present in the question.
+6) For concept queries (e.g., "海边", "南方", "camping"), include the concept keyword.
 
 示例：
 - "二丫喜欢什么" → ["二丫"]
 - "昊哥和二丫是什么关系" → ["昊哥", "二丫"]
 - "谁住在海边" → ["海边"]
 - "谁来自南方" → ["南方"]
-- "今天天气怎么样" → []
-- "你好" → []"""
+- "Who lives by the sea?" → ["by the sea"]
+- "When did Caroline go to the LGBTQ support group?" → ["Caroline", "LGBTQ support group"]
+- "How is the weather today?" → []
+- "Hello" → []"""
                     },
                     {
                         "role": "user",
@@ -1163,7 +1043,8 @@ class RetrievalService:
                     }
                 ],
                 temperature=0.0,
-                max_tokens=100
+                max_tokens=120,
+                timeout=max(1.0, float(getattr(settings, "GRAPH_FACTS_TIMEOUT_S", 1.0))),
             )
             
             content = response.choices[0].message.content.strip()
@@ -1197,4 +1078,28 @@ class RetrievalService:
             for pattern in patterns:
                 matches = re.findall(pattern, query)
                 entities.extend(matches)
-            return list(set(entities))
+            en_candidates = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b", query)
+            en_stop = {
+                "When",
+                "What",
+                "Who",
+                "Where",
+                "Why",
+                "How",
+                "The",
+                "A",
+                "An",
+                "Is",
+                "Are",
+                "Was",
+                "Were",
+                "Do",
+                "Does",
+                "Did",
+                "I",
+                "You",
+                "We",
+                "They",
+            }
+            en_entities = [c.strip() for c in en_candidates if c.strip() and c.strip() not in en_stop]
+            return list(set(entities + en_entities))

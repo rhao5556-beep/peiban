@@ -8,30 +8,30 @@
 
 ### 1. OPENAI_API_KEY - 硅基流动
 
-**状态**: ✅ 已正确配置
+**状态**: ⚠️ 需要你填写真实配置
 
 ```env
-OPENAI_API_KEY=sk-xyuqotucvlvthyssvbnkqxtwhbylgummomshkqvfecaueghcx
+OPENAI_API_KEY=sk-REPLACE_WITH_YOUR_SILICONFLOW_KEY
 OPENAI_API_BASE=https://api.siliconflow.cn/v1
 OPENAI_MODEL=deepseek-ai/DeepSeek-V3
 ```
 
 - ✅ 使用硅基流动 API
 - ✅ 模型是 DeepSeek-V3
-- ✅ 配置正确，可以直接使用
+- ✅ 按示例填写后即可使用
 
 ---
 
 ### 2. JWT_SECRET - JWT 加密密钥
 
-**状态**: ✅ 已更新为强随机字符串
+**状态**: ⚠️ 需要你生成并填写随机字符串
 
 ```env
-JWT_SECRET=nlNLbV62eKjedCT3tOacNEVE13cBRC25I61KtQcTMiw
+JWT_SECRET=REPLACE_WITH_RANDOM_SECRET
 ```
 
 - ❌ **不需要花钱** - 这是自己生成的随机字符串
-- ✅ 已更新为更安全的随机密钥
+- ✅ 填写后可用于加密用户登录 Token
 - ✅ 用于加密用户登录 Token
 
 **如何生成**:

@@ -19,29 +19,32 @@ export interface Message {
   memoryState?: MemoryState; // For AI messages primarily
   memoryId?: string; // To track backend memory ID for polling
   isTyping?: boolean; // For UI feedback
-  meme?: {
-    memeId: string;
-    usageId: string;
-    description: string;
-    imageUrl?: string;
-  };
 }
 
 export interface GraphNode {
   id: string;
-  label: string;
-  type: 'concept' | 'entity' | 'event';
-  weight?: number;
-  properties?: Record<string, unknown>;
+  name: string;  // 后端返回的字段名
+  label?: string;  // 用于显示，从 name 映射
+  type: string;  // person, place, preference, event, concept 等
+  mention_count?: number;
+  weight?: number;  // 用于可视化，从 mention_count 映射
+  first_mentioned_at?: string;
+  last_mentioned_at?: string;
 }
 
 export interface GraphEdge {
   id: string;
-  source: string;
-  target: string;
-  label: string;
-  weight?: number;
-  properties?: Record<string, unknown>;
+  source_id: string;  // 后端返回的字段名
+  target_id: string;  // 后端返回的字段名
+  source?: string;  // 用于 Cytoscape，从 source_id 映射
+  target?: string;  // 用于 Cytoscape，从 target_id 映射
+  relation_type: string;  // 后端返回的字段名
+  label?: string;  // 用于显示，从 relation_type 映射
+  weight: number;
+  current_weight?: number;
+  decay_rate?: number;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface GraphData {
@@ -64,7 +67,7 @@ export interface UserState {
 // --- New Types for Backend Integration ---
 
 export interface StreamEvent {
-  type: 'start' | 'text' | 'memory_pending' | 'meme' | 'done' | 'error';
+  type: 'start' | 'text' | 'memory_pending' | 'memory_committed' | 'done' | 'error';
   content?: string;
   session_id?: string;
   memory_id?: string;

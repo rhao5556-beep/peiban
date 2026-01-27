@@ -22,8 +22,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         
         # 获取客户端 IP
         client_ip = request.client.host if request.client else "unknown"
-        if client_ip == "::1" or client_ip.startswith("127.") or client_ip.startswith("::ffff:127."):
-            return await call_next(request)
         
         # 清理过期请求记录
         current_time = time.time()

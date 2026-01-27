@@ -58,8 +58,6 @@ def aggregate_trending_memes(self):
                 # 2. 处理每个候选表情包
                 for candidate in meme_candidates:
                     try:
-                        if hasattr(candidate, "to_dict"):
-                            candidate = candidate.to_dict()
                         # 检查重复（通过 content_hash）
                         is_duplicate = await pool_manager.check_duplicate(candidate["content_hash"])
                         

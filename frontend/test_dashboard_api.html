@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard API 测试</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .test-section {
+            background: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button.delete {
+            background: #f44336;
+        }
+        button.delete:hover {
+            background: #da190b;
+        }
+        pre {
+            background: #f4f4f4;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .success {
+            color: #4CAF50;
+            font-weight: bold;
+        }
+        .error {
+            color: #f44336;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Dashboard API 功能测试</h1>
+    <p>此页面用于测试新添加的 5 个 API 方法（Mock 模式）</p>
+
+    <div class="test-section">
+        <h2>1. getDashboard() - 获取仪表盘数据</h2>
+        <button onclick="testGetDashboard()">测试 getDashboard</button>
+        <div id="dashboard-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>2. getMemories(limit) - 获取记忆列表</h2>
+        <button onclick="testGetMemories()">测试 getMemories(50)</button>
+        <div id="memories-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>3. getMemory(id) - 获取单条记忆详情</h2>
+        <button onclick="testGetMemory()">测试 getMemory('mem_1')</button>
+        <div id="memory-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>4. deleteMemories(ids) - 批量删除记忆</h2>
+        <button class="delete" onclick="testDeleteMemories()">测试 deleteMemories(['mem_1', 'mem_2'])</button>
+        <div id="delete-memories-result"></div>
+    </div>
+
+    <div class="test-section">
+        <h2>5. deleteAllMemories() - 删除全部记忆</h2>
+        <button class="delete" onclick="testDeleteAllMemories()">测试 deleteAllMemories()</button>
+        <div id="delete-all-result"></div>
+    </div>
+
+    <script type="module">
+        // 模拟 api.ts 中的方法（简化版，仅用于测试）
+        const USE_MOCK_DATA = true;
+
+        window.api = {
+            getDashboard: async () => {
+                if (USE_MOCK_DATA) {
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                    return {
+                        relationship: {
+                            state: 'friend',
+                            state_display: '朋友',
+                            score: 0.55,
+                            score_raw: 0.55,
+                            hearts: '💙💙💙'
+                        },
+                        days_known: 30,
+                        memories: { count: 15, can_view_details: true },
+                        top_topics: [
+                            { topic: '编程', count: 8 },
+                            { topic: '咖啡', count: 5 },
+                            { topic: 'AI', count: 3 }
+                        ],
+                        emotion_trend: [
+                            { date: '第1天', score: 10 },
+                            { date: '第15天', score: 35 },
+                            { date: '第30天', score: 55 }
+                        ],
+                        feedback: { likes: 12, dislikes: 2, saves: 5, favorites: 5 },
+                        health_reminder: null
+                    };
+                }
+            },
+
+            getMemories: async (limit) => {
+                if (USE_MOCK_DATA) {
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                    return [
+                        {
+                            id: 'mem_1',
+                            content: '小明喜欢喝咖啡',
+                            valence: 0.8,
+                            status: 'committed',
+                            created_at: new Date(Date.now() - 86400000 * 29).toISOString(),
+                            committed_at: new Date(Date.now() - 86400000 * 29).toISOString()
+                        },
+                        {
+                            id: 'mem_2',
+                            content: '小明是一名程序员',
+                            valence: 0.6,
+                            status: 'committed',
+                            created_at: new Date(Date.now() - 86400000 * 28).toISOString(),
+                            committed_at: new Date(Date.now() - 86400000 * 28).toISOString()
+                        },
+                        {
+                            id: 'mem_3',
+                            content: '小明经常深夜工作',
+                            valence: -0.2,
+                            status: 'committed',
+                            created_at: new Date(Date.now() - 86400000 * 15).toISOString(),
+                            committed_at: new Date(Date.now() - 86400000 * 15).toISOString()
+                        }
+                    ];
+                }
+            },
+
+            getMemory: async (memoryId) => {
+                if (USE_MOCK_DATA) {
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                    return {
+                        id: memoryId,
+                        content: '这是一条详细的记忆内容',
+                        valence: 0.7,
+                        status: 'committed',
+                        created_at: new Date(Date.now() - 86400000).toISOString(),
+                        committed_at: new Date(Date.now() - 86400000).toISOString()
+                    };
+                }
+            },
+
+            deleteMemories: async (memoryIds) => {
+                if (USE_MOCK_DATA) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    console.log('Mock: Deleted memories', memoryIds);
+                    return;
+                }
+            },
+
+            deleteAllMemories: async () => {
+                if (USE_MOCK_DATA) {
+                    await new Promise(resolve => setTimeout(resolve, 800));
+                    console.log('Mock: Deleted all memories');
+                    return;
+                }
+            }
+        };
+
+        window.testGetDashboard = async () => {
+            const resultDiv = document.getElementById('dashboard-result');
+            resultDiv.innerHTML = '<p>测试中...</p>';
+            try {
+                const result = await window.api.getDashboard();
+                resultDiv.innerHTML = `
+                    <p class="success">✓ 测试成功</p>
+                    <pre>${JSON.stringify(result, null, 2)}</pre>
+                `;
+            } catch (e) {
+                resultDiv.innerHTML = `<p class="error">✗ 测试失败: ${e.message}</p>`;
+            }
+        };
+
+        window.testGetMemories = async () => {
+            const resultDiv = document.getElementById('memories-result');
+            resultDiv.innerHTML = '<p>测试中...</p>';
+            try {
+                const result = await window.api.getMemories(50);
+                resultDiv.innerHTML = `
+                    <p class="success">✓ 测试成功 (返回 ${result.length} 条记忆)</p>
+                    <pre>${JSON.stringify(result, null, 2)}</pre>
+                `;
+            } catch (e) {
+                resultDiv.innerHTML = `<p class="error">✗ 测试失败: ${e.message}</p>`;
+            }
+        };
+
+        window.testGetMemory = async () => {
+            const resultDiv = document.getElementById('memory-result');
+            resultDiv.innerHTML = '<p>测试中...</p>';
+            try {
+                const result = await window.api.getMemory('mem_1');
+                resultDiv.innerHTML = `
+                    <p class="success">✓ 测试成功</p>
+                    <pre>${JSON.stringify(result, null, 2)}</pre>
+                `;
+            } catch (e) {
+                resultDiv.innerHTML = `<p class="error">✗ 测试失败: ${e.message}</p>`;
+            }
+        };
+
+        window.testDeleteMemories = async () => {
+            const resultDiv = document.getElementById('delete-memories-result');
+            resultDiv.innerHTML = '<p>测试中...</p>';
+            try {
+                await window.api.deleteMemories(['mem_1', 'mem_2']);
+                resultDiv.innerHTML = `<p class="success">✓ 测试成功 (已删除 2 条记忆)</p>`;
+            } catch (e) {
+                resultDiv.innerHTML = `<p class="error">✗ 测试失败: ${e.message}</p>`;
+            }
+        };
+
+        window.testDeleteAllMemories = async () => {
+            const resultDiv = document.getElementById('delete-all-result');
+            resultDiv.innerHTML = '<p>测试中...</p>';
+            try {
+                await window.api.deleteAllMemories();
+                resultDiv.innerHTML = `<p class="success">✓ 测试成功 (已删除全部记忆)</p>`;
+            } catch (e) {
+                resultDiv.innerHTML = `<p class="error">✗ 测试失败: ${e.message}</p>`;
+            }
+        };
+    </script>
+</body>
+</html>

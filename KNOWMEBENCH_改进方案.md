@@ -2,13 +2,6 @@
 
 基于评测结果（平均分 3.29/5.0），针对弱项任务提出系统性改进方案。
 
-## ⚠️ 重要说明（与当前仓库实现对齐）
-
-1. **可改的评测入口脚本**在 [run_knowmebench_dataset1_pipeline.py](file:///c:/Users/murphy/Desktop/%E9%99%AA%E4%BC%B4%E9%A1%B9%E7%9B%AE/evals/run_knowmebench_dataset1_pipeline.py)，而不是 `affinity_evals/knowmebench/*.py`（仓库内该路径缺少可读源码）。
-2. 当前后端 `POST /api/v1/conversation/message` 的请求体 **不包含 `eval_mode`/`task_type` 字段**（见 [conversation.py](file:///c:/Users/murphy/Desktop/%E9%99%AA%E4%BC%B4%E9%A1%B9%E7%9B%AE/backend/app/api/endpoints/conversation.py#L24-L30)），因此评测脚本发出的 `eval_mode` 目前不会触发任何“评测专用隔离/路由”逻辑。
-3. `graph_only` 目前只“物理隔离了 history”，但仍会并行执行向量检索（见 [conversation_service.py](file:///c:/Users/murphy/Desktop/%E9%99%AA%E4%BC%B4%E9%A1%B9%E7%9B%AE/backend/app/services/conversation_service.py#L528-L546)）。如果后续在“有向量记忆的用户”上评测，会污染 graph_only 的评测假设，因此建议把“真正 graph_only”列为 P0 修复。
-4. Dataset1 评测脚本会把 **record excerpt 直接拼进用户 message**，所以“信息提取满分”更多是“给定上下文的阅读理解”，并非图谱/向量检索能力；针对 KnowMeBench 的改动应优先约束“只能用注入上下文作证据、不得编造/不得引入额外事件”。
-
 ## 📊 问题诊断
 
 ### 🔴 高优先级问题（P0）
@@ -41,8 +34,8 @@
 - 未能明确表示"不知道"
 
 **根本原因**：
-- 缺少“证据引用/证据覆盖”机制（回答没有被强制绑定到上下文证据）
-- 当前后端没有“评测模式的拒答策略”，只能依赖通用 Prompt 约束，遇到诱导提问时仍可能“补全细节”
+- 缺少"信息充分性"判断机制
+- LLM 倾向于"有问必答"而非承认不知道
 
 
 ### 🟡 中优先级问题（P1）
@@ -75,21 +68,20 @@
 **目标**: 提升 Adversarial Abstention 从 3.33 → 4.5+
 
 **实施步骤**：
-1. 为对话接口增加 `eval_mode` 与 `eval_task_type`（可选）字段，让后端能做“评测专用策略”
-2. 在评测模式下启用“证据引用约束”：每个具体事实必须能在注入上下文中找到原文支撑，否则拒答
-3. 对 Adversarial Abstention 启用更严格的拒答模板（信息不足时直接拒答，而不是尝试补全）
+1. 在 `conversation_service.py` 中添加信息充分性检查
+2. 修改 LLM prompt，明确指示"信息不足时必须拒答"
+3. 添加置信度评分机制
 
-**代码位置（建议）**:
-- `backend/app/api/endpoints/conversation.py`（请求体字段）
-- `backend/app/services/conversation_service.py`（Prompt/策略）
+**代码位置**: `backend/app/services/conversation_service.py`
 
 **Prompt 优化示例**：
 ```python
 SYSTEM_PROMPT = """
 你是一个严谨的 AI 助手。回答问题时：
-1. 仅基于已提供的证据上下文回答（评测模式下：以“记录上下文”为证据）
-2. 每个具体事实必须能在证据中找到原文支撑；找不到就拒答
-3. 绝对不要编造细节；不确定时直接说明信息不足
+1. 仅基于检索到的上下文回答
+2. 如果上下文中没有相关信息，明确说"我不知道"或"信息不足"
+3. 绝对不要编造或推测信息
+4. 不确定时，宁可拒答也不要猜测
 """
 ```
 
@@ -98,19 +90,16 @@ SYSTEM_PROMPT = """
 **目标**: 提升 Temporal Reasoning 从 1.67 → 3.0+
 
 **实施步骤**：
-1. 在评测模式下对 Temporal Reasoning 启用“精确计算”策略（优先用代码计算，其次再让 LLM 解释）
-2. 统一对输出做“精度约束”：题目要求到秒就必须输出到秒，禁止四舍五入
-3. 对输入里的时间表达做结构化抽取（时间点/持续时长/区间），再做计算与输出格式化
+1. 在 `llm_extraction_service.py` 中增强时间实体识别
+2. 添加时间格式标准化（统一为 ISO 8601）
+3. 提取时间时保留完整精度（包括秒）
 
-**代码位置（建议）**:
-- `backend/app/services/conversation_service.py`（回答侧策略更直接影响 KnowMeBench 分数）
-- （可选）新增 `backend/app/services/temporal_reasoning_service.py` 提供可复用计算能力
-
-> 说明：`llm_extraction_service.py` 主要影响“图谱写入/长期记忆抽取”，对 Dataset1 这种“直接注入上下文”的评测收益有限；时间推理分数更依赖回答阶段的精确计算与格式约束。
+**代码位置**: `backend/app/services/llm_extraction_service.py`
 
 **改进点**：
 ```python
-# 目标：保留完整时间信息并可计算（精确到秒）
+# 当前：可能丢失时间精度
+# 改进：保留完整时间信息
 {
     "entity_type": "TIME",
     "value": "2024-01-15 14:30:45",  # 精确到秒
@@ -178,8 +167,8 @@ class TemporalReasoningService:
 
 **实施步骤**：
 1. 设计专门的心理分析 prompt 模板
-2. 采用结构化输出（观察→机制→动机→证据引用），避免泛泛而谈
-3. 明确禁止引入证据外的新人物/新事件/新因果链（这是扣分点之一）
+2. 引入 Chain-of-Thought 推理
+3. 要求 LLM 先分析表层行为，再深入动机
 
 **Prompt 模板**：
 ```python
@@ -198,21 +187,18 @@ PSYCHOANALYSIS_PROMPT = """
 3. 深层动机和潜意识因素
 4. 与过往经历的关联
 
-要求：
-- 每条洞察后附上你引用的证据片段（从上下文逐字摘取一小段）
-- 不要引入上下文中没有的具体情节/人物/地点
+请提供深入的心理学洞察，而非泛泛而谈。
 """
 ```
-
 
 
 #### 方案 2.3: 任务类型自动识别与路由
 **目标**: 针对不同任务类型使用不同策略
 
 **实施步骤**：
-1. 评测模式优先由评测脚本显式传入 `eval_task_type`，避免靠关键词猜任务
-2. 根据 task_type 选择不同的 prompt 与约束（如：Temporal 要计算、Ordering 要禁止新增事件、Abstention 要更严格拒答）
-3. 非评测模式再退化为轻量分类器（可选）
+1. 在 `conversation_service.py` 中添加任务分类器
+2. 根据任务类型选择不同的 prompt 和处理流程
+3. 为每种任务类型优化检索策略
 
 **实现示例**：
 ```python
@@ -239,9 +225,9 @@ class TaskRouter:
 **目标**: 提升地理位置准确性
 
 **实施步骤**：
-1. 对“地点类答案”启用“原文优先”策略：优先输出上下文中出现的地点字符串（逐字匹配），禁止用常识替换为“更知名/更大范围”的地点
-2. 若上下文出现多个地点且问题未指明，列出候选并说明各自证据（避免猜）
-3. 只有当业务侧确实需要（非评测）才引入地理数据库/坐标等外部依赖
+1. 在实体提取中增加地理实体类型
+2. 使用地理数据库验证地名
+3. 保留地理实体的层级关系（国家-城市-街道）
 
 **改进点**：
 ```python
@@ -274,10 +260,12 @@ class TaskRouter:
 **评测命令**：
 ```bash
 # Graph only
-python evals/run_knowmebench_dataset1_pipeline.py --mode graph_only --eval_mode --concurrency 6
+python affinity_evals/knowmebench/run_dataset1_pipeline.py \
+  --mode graph_only --eval_mode --concurrency 6
 
 # Hybrid
-python evals/run_knowmebench_dataset1_pipeline.py --mode hybrid --eval_mode --concurrency 6
+python affinity_evals/knowmebench/run_dataset1_pipeline.py \
+  --mode hybrid --eval_mode --concurrency 6
 ```
 
 #### 方案 3.2: 多跳推理增强
@@ -353,7 +341,8 @@ TEMPORAL_RULES = {
 ```bash
 # 每周自动评测
 # weekly_eval.bat
-python evals/run_knowmebench_dataset1_pipeline.py --mode graph_only --eval_mode
+python affinity_evals/knowmebench/run_dataset1_pipeline.py --mode graph_only --eval_mode
+python affinity_evals/knowmebench/official_judge.py --input_dir <latest_dir>
 python generate_trend_report.py  # 生成趋势报告
 ```
 
@@ -417,27 +406,58 @@ python generate_trend_report.py  # 生成趋势报告
 
 ### 第一步：增强"不知道"判断（本周）
 
-**修改文件（建议最小闭环）**:
-- `backend/app/api/endpoints/conversation.py`（增加 `eval_mode` / `eval_task_type`）
-- `backend/app/services/conversation_service.py`（评测模式 Prompt 与拒答策略）
+**修改文件**: `backend/app/services/conversation_service.py`
 
 **修改内容**:
 ```python
-# 推荐策略（避免再加一次 LLM 调用做 sufficiency，既耗时又容易“自证充分”）：
-# 1) 评测模式下，强制“证据引用”：每个具体事实都要引用注入上下文中的原文片段
-# 2) 若无法引用到关键事实（或上下文明显不含该信息），直接拒答
-# 3) 对 Adversarial Abstention 任务，优先使用更严格拒答模板
-#
-# 技术落点：
-# - 请求体加入 eval_mode / eval_task_type
-# - _build_prompt 在 eval_mode 下追加“证据引用/禁止补全细节”的规则
-# - 生成回答后做一次简单的后验检查：若回答出现大量上下文未出现的专有名词/地点/数字，则改为拒答或降级为“信息不足”
+# 在生成回答前添加信息充分性检查
+async def check_information_sufficiency(
+    self, 
+    question: str, 
+    context: List[str]
+) -> Tuple[bool, float]:
+    """
+    检查上下文是否足以回答问题
+    返回: (是否充分, 置信度)
+    """
+    prompt = f"""
+    问题: {question}
+    上下文: {context}
+    
+    请判断上下文是否包含足够信息回答问题。
+    如果信息不足或不相关，返回 "insufficient"
+    如果信息充分，返回 "sufficient"
+    同时给出置信度 (0-1)
+    
+    输出格式: {{"status": "sufficient/insufficient", "confidence": 0.8}}
+    """
+    
+    result = await self.llm_service.call(prompt)
+    # 解析结果
+    if result["status"] == "insufficient" or result["confidence"] < 0.6:
+        return False, result["confidence"]
+    return True, result["confidence"]
+
+# 在 generate_response 中使用
+async def generate_response(self, question: str, context: List[str]):
+    is_sufficient, confidence = await self.check_information_sufficiency(
+        question, context
+    )
+    
+    if not is_sufficient:
+        return "根据我目前掌握的信息，我无法准确回答这个问题。"
+    
+    # 继续正常生成回答
+    ...
 ```
 
 **验证方法**:
 ```bash
 # 运行 Adversarial Abstention 测试
-python evals/run_knowmebench_dataset1_pipeline.py --mode graph_only --eval_mode --task "Adversarial Abstention" --limit_per_task 10
+python affinity_evals/knowmebench/run_dataset1_pipeline.py \
+  --task "Adversarial Abstention" \
+  --limit_per_task 10 \
+  --mode graph_only
 ```
 
 **预期结果**: Adversarial Abstention 分数从 3.33 提升到 4.0+
@@ -445,22 +465,65 @@ python evals/run_knowmebench_dataset1_pipeline.py --mode graph_only --eval_mode 
 
 ### 第二步：优化时间实体提取（下周）
 
-**修改文件（优先回答侧）**:
-- `backend/app/services/conversation_service.py`
-- （可选）新增 `backend/app/services/temporal_reasoning_service.py`
+**修改文件**: `backend/app/services/llm_extraction_service.py`
 
 **修改内容**:
 ```python
-# 推荐策略：
-# - 先从上下文中抽取时间点/区间/时长（允许 LLM，但要结构化输出）
-# - 时间计算尽量走代码（datetime/正则即可覆盖 KnowMeBench 常见格式）
-# - 输出严格保留题目要求的精度（秒级、分钟级），禁止四舍五入
+# 增强时间实体提取
+TEMPORAL_EXTRACTION_PROMPT = """
+从以下文本中提取所有时间相关信息：
+
+文本: {text}
+
+要求：
+1. 提取所有时间点（精确到秒）
+2. 提取所有时间段/持续时长
+3. 提取时间关系（before, after, during）
+4. 保留原始精度，不要四舍五入
+
+输出格式：
+{{
+    "time_points": [
+        {{"value": "2024-01-15 14:30:45", "precision": "second"}},
+        ...
+    ],
+    "durations": [
+        {{"value": "1 hour 15 minutes 10 seconds", "seconds": 4510}},
+        ...
+    ],
+    "temporal_relations": [
+        {{"event1": "...", "relation": "before", "event2": "..."}},
+        ...
+    ]
+}}
+"""
+
+class TemporalEntityExtractor:
+    async def extract_temporal_entities(self, text: str) -> Dict:
+        """提取时间实体"""
+        result = await self.llm_service.call(
+            TEMPORAL_EXTRACTION_PROMPT.format(text=text)
+        )
+        
+        # 标准化时间格式
+        for tp in result.get("time_points", []):
+            tp["iso_format"] = self._to_iso_format(tp["value"])
+        
+        return result
+    
+    def _to_iso_format(self, time_str: str) -> str:
+        """转换为 ISO 8601 格式"""
+        # 实现时间格式标准化
+        pass
 ```
 
 **验证方法**:
 ```bash
 # 运行 Temporal Reasoning 测试
-python evals/run_knowmebench_dataset1_pipeline.py --mode graph_only --eval_mode --task "Temporal Reasoning" --limit_per_task 10
+python affinity_evals/knowmebench/run_dataset1_pipeline.py \
+  --task "Temporal Reasoning" \
+  --limit_per_task 10 \
+  --mode graph_only
 ```
 
 **预期结果**: Temporal Reasoning 分数从 1.67 提升到 2.5+
@@ -550,7 +613,7 @@ python compare_eval_results.py \
 - [ ] 实施方案 1.2（时间实体提取）
 - [ ] 实施方案 2.2（心理分析 Prompt）
 - [ ] 运行完整评测
-- [ ] 对比两次评测的 EVALUATION_REPORT/judge_results
+- [ ] 生成对比报告
 
 ---
 
@@ -567,7 +630,7 @@ python compare_eval_results.py \
 
 ### 工具脚本
 - `run_knowmebench_eval.bat` - 快捷评测脚本
-- `evals/run_knowmebench_dataset1_pipeline.py` - Dataset1 评测入口（可读源码）
+- `affinity_evals/knowmebench/` - 评测框架
 
 ---
 

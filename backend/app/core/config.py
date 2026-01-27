@@ -1,12 +1,18 @@
 """应用配置"""
 from typing import List
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 from pathlib import Path
 
 
 class Settings(BaseSettings):
     """应用配置类"""
+
+    model_config = SettingsConfigDict(
+        env_file=str(Path(__file__).resolve().parents[2] / ".env"),
+        case_sensitive=True,
+        extra="ignore",
+    )
     
     # 应用配置
     APP_NAME: str = "Affinity"
@@ -42,24 +48,16 @@ class Settings(BaseSettings):
     LLM_REQUEST_TIMEOUT_S: float = 30.0
     EMBEDDING_REQUEST_TIMEOUT_S: float = 20.0
     ENTITY_EXTRACTION_TIMEOUT_S: float = 0.8
+    ENTITY_EXTRACTION_MAX_RETRIES: int = 2
+    ENTITY_EXTRACTION_RETRY_BACKOFF_S: float = 0.6
+    ENTITY_EXTRACTION_FALLBACK_ENABLED: bool = True
+    ENTITY_EXTRACTION_INLINE_TIMEOUT_S: float = 2.0
+    ENTITY_EXTRACTION_INLINE_MAX_RETRIES: int = 0
     ENTITY_EXTRACTION_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
 
     # 图谱事实检索降级配置
     GRAPH_FACTS_ENABLED: bool = True
     GRAPH_FACTS_TIMEOUT_S: float = 0.9
-
-    # 联网搜索（Tavily）
-    WEB_SEARCH_ENABLED: bool = False
-    TAVILY_API_KEY: str = ""
-    TAVILY_API_BASE_URL: str = "https://api.tavily.com"
-    TAVILY_MAX_RESULTS: int = 5
-    TAVILY_SEARCH_TIMEOUT_S: float = 3.0
-    # 兼容额外环境变量（避免 Pydantic 严格模式报错）
-    CONTENT_PUBLISHER_WEIGHTS: str = ""
-    TAVILY_ENABLED: bool = False
-    TAVILY_SEARCH_DEPTH: str = "basic"
-    TAVILY_INCLUDE_ANSWER: bool = False
-    CONTENT_RSS_EXTRA_FEEDS: str = ""
     
     # CORS 配置 (支持常见前端端口)
     CORS_ORIGINS: List[str] = [
@@ -73,11 +71,12 @@ class Settings(BaseSettings):
     ]
     
     # Rate Limiting
-    RATE_LIMIT_PER_MINUTE: int = 100000
+    RATE_LIMIT_PER_MINUTE: int = 100
     
     # Outbox 配置
     OUTBOX_MAX_RETRIES: int = 5
     OUTBOX_BACKOFF_BASE: int = 2
+    OUTBOX_INLINE_PROCESSING: bool = True
     
     # SLO 配置
     SLO_MEDIAN_LAG_MS: int = 2000
@@ -113,10 +112,6 @@ class Settings(BaseSettings):
     CONTENT_LIBRARY_IN_CONVERSATION_ENABLED: bool = False
     CONTENT_LIBRARY_IN_CONVERSATION_MAX_ITEMS: int = 2
     CONTENT_LIBRARY_IN_CONVERSATION_TIMEOUT_MS: int = 150
-    
-    class Config:
-        env_file = str(Path(__file__).resolve().parents[2] / ".env")
-        case_sensitive = True
 
 
 @lru_cache()

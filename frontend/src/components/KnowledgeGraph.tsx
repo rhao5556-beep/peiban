@@ -10,16 +10,8 @@ interface KnowledgeGraphProps {
 
 const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ data, day }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const graphAreaRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
   const [, setLayoutReady] = useState(false);
-  const [hoverCard, setHoverCard] = useState<null | {
-    kind: 'node' | 'edge';
-    id: string;
-    x: number;
-    y: number;
-    entries: Array<[string, string]>;
-  }>(null);
 
   // 6.1.1 Initialize Cytoscape
   useEffect(() => {
@@ -78,80 +70,13 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ data, day }) => {
             'text-background-color': '#f3f4f6', // gray-100
             'text-background-opacity': 1,
             'text-background-padding': '2px',
-            'opacity': ('mapData(weight, 0, 1, 0.3, 1)' as any) // 根据权重调整透明度
+            'opacity': 'mapData(weight, 0, 1, 0.3, 1)' as any
           }
         }
       ],
       layout: { name: 'grid' },
       wheelSensitivity: 0.2,
     });
-
-    const formatValue = (value: unknown) => {
-      if (value === null) return 'null';
-      if (value === undefined) return '';
-      if (typeof value === 'string') return value;
-      if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-      try {
-        return JSON.stringify(value);
-      } catch {
-        return String(value);
-      }
-    };
-
-    const buildEntries = (cyData: Record<string, unknown>) => {
-      const { properties, ...rest } = cyData as any;
-      const props = properties && typeof properties === 'object' ? (properties as Record<string, unknown>) : {};
-      const combined: Record<string, unknown> = { ...props, ...rest };
-      return Object.entries(combined)
-        .filter(([, v]) => v !== undefined)
-        .map(([k, v]) => [k, formatValue(v)] as [string, string])
-        .sort(([a], [b]) => a.localeCompare(b, 'zh-Hans-CN'));
-    };
-
-    const getRenderedPos = (evt: any): { x: number; y: number } | null => {
-      const p = evt?.renderedPosition;
-      if (!p || typeof p.x !== 'number' || typeof p.y !== 'number') return null;
-      return { x: p.x, y: p.y };
-    };
-
-    const showHoverCard = (evt: any) => {
-      const pos = getRenderedPos(evt);
-      const ele = evt?.target;
-      if (!pos || !ele) return;
-      const d = ele.data() as Record<string, unknown>;
-      setHoverCard({
-        kind: ele.isNode() ? 'node' : 'edge',
-        id: ele.id(),
-        x: pos.x,
-        y: pos.y,
-        entries: buildEntries(d)
-      });
-    };
-
-    const moveHoverCard = (evt: any) => {
-      const pos = getRenderedPos(evt);
-      const ele = evt?.target;
-      if (!pos || !ele) return;
-      setHoverCard(prev => {
-        if (!prev || prev.id !== ele.id()) return prev;
-        return { ...prev, x: pos.x, y: pos.y };
-      });
-    };
-
-    const hideHoverCard = (evt: any) => {
-      const ele = evt?.target;
-      if (!ele) {
-        setHoverCard(null);
-        return;
-      }
-      setHoverCard(prev => (prev && prev.id === ele.id() ? null : prev));
-    };
-
-    const cy = cyRef.current;
-    cy.on('mouseover', 'node,edge', showHoverCard);
-    cy.on('mousemove', 'node,edge', moveHoverCard);
-    cy.on('mouseout', 'node,edge', hideHoverCard);
-    cy.on('zoom pan', () => setHoverCard(null));
 
     return () => {
       if (cyRef.current) {
@@ -176,7 +101,14 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ data, day }) => {
       cy.elements().remove();
       
       const cyNodes = data.nodes.map(n => ({
-        data: { id: n.id, label: n.label, type: n.type, weight: n.weight || 10, properties: n.properties }
+        data: { 
+          id: n.id, 
+          label: n.label, 
+          type: n.type, 
+          weight: n.weight || 10,
+          // 保存所有原始属性用于 tooltip
+          ...n
+        }
       }));
       
       // 过滤掉引用不存在节点的边
@@ -196,8 +128,9 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ data, day }) => {
           source: e.source, 
           target: e.target, 
           label: e.label,
-          weight: e.weight || 1,  // 传递权重用于边的粗细和透明度
-          properties: e.properties
+          weight: e.weight || 1,
+          // 保存所有原始属性用于 tooltip
+          ...e
         }
       }));
 
@@ -221,6 +154,160 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ data, day }) => {
     layout.run();
     setLayoutReady(true);
 
+  }, [data]);
+
+  // 6.1.2.1 Add Tooltip on Hover
+  useEffect(() => {
+    if (!cyRef.current) return;
+    const cy = cyRef.current;
+
+    // 创建 tooltip 元素
+    let tooltip: HTMLDivElement | null = null;
+
+    const formatValue = (value: any): string => {
+      if (value === null || value === undefined) return 'N/A';
+      if (typeof value === 'number') return value.toFixed(3);
+      if (typeof value === 'boolean') return value ? 'true' : 'false';
+      if (Array.isArray(value)) return `[${value.length} items]`;
+      if (typeof value === 'object') return JSON.stringify(value);
+      return String(value);
+    };
+
+    const showTooltip = (evt: any) => {
+      const target = evt.target;
+      const data = target.data();
+      
+      // 移除旧的 tooltip
+      if (tooltip) {
+        tooltip.remove();
+      }
+
+      // 创建新的 tooltip
+      tooltip = document.createElement('div');
+      tooltip.style.position = 'fixed';
+      tooltip.style.backgroundColor = 'rgba(0, 0, 0, 0.9)';
+      tooltip.style.color = 'white';
+      tooltip.style.padding = '10px 14px';
+      tooltip.style.borderRadius = '8px';
+      tooltip.style.fontSize = '11px';
+      tooltip.style.lineHeight = '1.6';
+      tooltip.style.pointerEvents = 'none';
+      tooltip.style.zIndex = '10000';
+      tooltip.style.maxWidth = '350px';
+      tooltip.style.boxShadow = '0 4px 12px rgba(0,0,0,0.4)';
+      tooltip.style.border = '1px solid rgba(255,255,255,0.1)';
+      tooltip.style.fontFamily = 'monospace';
+
+      // 构建 tooltip 内容
+      let content = '';
+      if (target.isNode()) {
+        content = `<div style="font-weight: bold; margin-bottom: 6px; color: #60a5fa; font-size: 12px; border-bottom: 1px solid rgba(96, 165, 250, 0.3); padding-bottom: 4px;">📍 节点信息</div>`;
+        
+        // 按优先级排序属性
+        const priorityKeys = ['label', 'name', 'type', 'mention_count', 'weight', 'first_mentioned_at', 'last_mentioned_at'];
+        const allKeys = Object.keys(data);
+        const sortedKeys = [
+          ...priorityKeys.filter(k => allKeys.includes(k)),
+          ...allKeys.filter(k => !priorityKeys.includes(k) && k !== 'id')
+        ];
+        
+        sortedKeys.forEach(key => {
+          const value = data[key];
+          const displayValue = formatValue(value);
+          content += `<div style="margin: 3px 0;"><span style="color: #9ca3af; font-weight: 600;">${key}:</span> <span style="color: #e5e7eb;">${displayValue}</span></div>`;
+        });
+      } else if (target.isEdge()) {
+        content = `<div style="font-weight: bold; margin-bottom: 6px; color: #34d399; font-size: 12px; border-bottom: 1px solid rgba(52, 211, 153, 0.3); padding-bottom: 4px;">🔗 关系信息</div>`;
+        
+        // 按优先级排序属性
+        const priorityKeys = ['label', 'relation_type', 'weight', 'current_weight', 'decay_rate', 'created_at', 'updated_at'];
+        const allKeys = Object.keys(data);
+        const sortedKeys = [
+          ...priorityKeys.filter(k => allKeys.includes(k)),
+          ...allKeys.filter(k => !priorityKeys.includes(k) && k !== 'id' && k !== 'source' && k !== 'target')
+        ];
+        
+        sortedKeys.forEach(key => {
+          const value = data[key];
+          const displayValue = formatValue(value);
+          content += `<div style="margin: 3px 0;"><span style="color: #9ca3af; font-weight: 600;">${key}:</span> <span style="color: #e5e7eb;">${displayValue}</span></div>`;
+        });
+      }
+
+      tooltip.innerHTML = content;
+      document.body.appendChild(tooltip);
+
+      // 更新 tooltip 位置 - 使用 fixed 定位，相对于视口
+      const updatePosition = (e: any) => {
+        if (tooltip && containerRef.current) {
+          const containerRect = containerRef.current.getBoundingClientRect();
+          const renderedPos = e.renderedPosition || e.target.renderedPosition();
+          
+          // 计算相对于视口的位置
+          const x = containerRect.left + renderedPos.x;
+          const y = containerRect.top + renderedPos.y;
+          
+          // 偏移量更小，更靠近节点/边
+          const offsetX = 15;
+          const offsetY = -10;
+          
+          // 获取 tooltip 尺寸
+          const tooltipRect = tooltip.getBoundingClientRect();
+          
+          // 计算最终位置，避免超出视口
+          let finalX = x + offsetX;
+          let finalY = y + offsetY;
+          
+          // 右边界检查
+          if (finalX + tooltipRect.width > window.innerWidth - 10) {
+            finalX = x - tooltipRect.width - offsetX;
+          }
+          
+          // 下边界检查
+          if (finalY + tooltipRect.height > window.innerHeight - 10) {
+            finalY = y - tooltipRect.height - offsetY;
+          }
+          
+          // 上边界检查
+          if (finalY < 10) {
+            finalY = 10;
+          }
+          
+          // 左边界检查
+          if (finalX < 10) {
+            finalX = 10;
+          }
+          
+          tooltip.style.left = `${finalX}px`;
+          tooltip.style.top = `${finalY}px`;
+        }
+      };
+      updatePosition(evt);
+    };
+
+    const hideTooltip = () => {
+      if (tooltip) {
+        tooltip.remove();
+        tooltip = null;
+      }
+    };
+
+    // 绑定事件
+    cy.on('mouseover', 'node, edge', showTooltip);
+    cy.on('mouseout', 'node, edge', hideTooltip);
+    cy.on('drag', 'node', hideTooltip);
+    cy.on('pan zoom', hideTooltip);
+
+    // 清理函数
+    return () => {
+      cy.off('mouseover', 'node, edge', showTooltip);
+      cy.off('mouseout', 'node, edge', hideTooltip);
+      cy.off('drag', 'node', hideTooltip);
+      cy.off('pan zoom', hideTooltip);
+      if (tooltip) {
+        tooltip.remove();
+      }
+    };
   }, [data]);
 
   // 6.1.3 Export Functionality
@@ -268,27 +355,7 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ data, day }) => {
 
       {/* Graph Container or Empty State */}
       <div className="flex-grow w-full h-full relative bg-gray-50/30">
-        <div ref={graphAreaRef} className="w-full h-full relative">
-          <div ref={containerRef} className={`w-full h-full cursor-grab active:cursor-grabbing ${!hasData ? 'hidden' : 'block'}`} />
-          {hoverCard && (
-            <div
-              className="absolute z-20 pointer-events-none max-w-sm bg-white/95 backdrop-blur-sm border border-gray-200 rounded-lg shadow-lg px-3 py-2 text-xs text-gray-900 max-h-64 overflow-auto"
-              style={{ left: hoverCard.x + 12, top: hoverCard.y + 12 }}
-            >
-              <div className="font-semibold text-gray-800">
-                {hoverCard.kind === 'node' ? '节点属性' : '关系属性'}
-              </div>
-              <div className="mt-2 space-y-1">
-                {hoverCard.entries.map(([k, v]) => (
-                  <div key={k} className="flex gap-2">
-                    <div className="shrink-0 w-28 text-gray-500">{k}</div>
-                    <div className="min-w-0 break-words">{v}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+        <div ref={containerRef} className={`w-full h-full cursor-grab active:cursor-grabbing ${!hasData ? 'hidden' : 'block'}`} />
         
         {!hasData && (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-400">

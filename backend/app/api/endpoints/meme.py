@@ -4,13 +4,12 @@ from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func, desc
-import uuid
+from sqlalchemy import select, and_, func
 
 from app.core.database import get_db
 from app.core.security import get_current_user
+from app.models.user import User
 from app.models.meme import Meme
-from app.models.meme_usage_history import MemeUsageHistory
 from app.models.user_meme_preference import UserMemePreference
 from app.api.schemas.meme import (
     MemeResponse,
@@ -29,7 +28,7 @@ router = APIRouter()
 @router.get("/trending", response_model=TrendingMemesResponse)
 async def get_trending_memes(
     limit: int = Query(default=20, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -110,7 +109,7 @@ async def get_trending_memes(
 @router.post("/feedback", status_code=status.HTTP_200_OK)
 async def submit_meme_feedback(
     feedback: MemeFeedbackRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -135,28 +134,10 @@ async def submit_meme_feedback(
         
         # 初始化服务
         usage_history_service = MemeUsageHistoryService(db)
-
-        usage_uuid = uuid.UUID(feedback.usage_id)
-        user_uuid = uuid.UUID(current_user["user_id"])
-        usage_row = (
-            await db.execute(
-                select(MemeUsageHistory).where(
-                    and_(
-                        MemeUsageHistory.id == usage_uuid,
-                        MemeUsageHistory.user_id == user_uuid
-                    )
-                )
-            )
-        ).scalar_one_or_none()
-        if not usage_row:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Usage record not found"
-            )
         
         # 记录反馈
         success = await usage_history_service.record_feedback(
-            usage_id=usage_uuid,
+            usage_id=feedback.usage_id,
             reaction=feedback.reaction
         )
         
@@ -188,7 +169,7 @@ async def submit_meme_feedback(
 
 @router.get("/stats", response_model=MemeStatsResponse)
 async def get_meme_stats(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -238,7 +219,7 @@ async def get_meme_stats(
 
 @router.get("/preferences", response_model=dict)
 async def get_meme_preferences(
-    current_user: dict = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -287,8 +268,8 @@ async def get_meme_preferences(
 
 @router.put("/preferences", response_model=dict)
 async def update_meme_preferences(
-    payload: dict,
-    current_user: dict = Depends(get_current_user),
+    meme_enabled: bool,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -303,12 +284,6 @@ async def update_meme_preferences(
         更新后的偏好设置
     """
     try:
-        if "meme_enabled" not in payload:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="meme_enabled is required"
-            )
-        meme_enabled = bool(payload["meme_enabled"])
         # 查询用户偏好
         result = await db.execute(
             select(UserMemePreference).where(
@@ -348,49 +323,4 @@ async def update_meme_preferences(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update preferences"
-        )
-
-
-@router.get("/search", response_model=List[MemeResponse])
-async def search_memes(
-    q: str = Query(default="", max_length=100),
-    limit: int = Query(default=20, ge=1, le=100),
-    current_user: dict = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    try:
-        query = select(Meme).where(
-            and_(
-                Meme.status == "approved",
-                Meme.safety_status == "approved"
-            )
-        )
-        if q.strip():
-            query = query.where(Meme.text_description.ilike(f"%{q.strip()}%"))
-        query = query.order_by(
-            desc(Meme.trend_score),
-            desc(Meme.usage_count),
-            desc(Meme.first_seen_at)
-        ).limit(limit)
-
-        result = await db.execute(query)
-        memes = result.scalars().all()
-        return [
-            MemeResponse(
-                id=str(m.id),
-                image_url=m.image_url,
-                text_description=m.text_description,
-                source_platform=m.source_platform,
-                category=m.category,
-                trend_score=m.trend_score or 0.0,
-                trend_level=m.trend_level,
-                usage_count=m.usage_count or 0
-            )
-            for m in memes
-        ]
-    except Exception as e:
-        logger.error(f"Failed to search memes: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to search memes"
         )

@@ -62,13 +62,15 @@ async def get_graph(
     try:
         graph_data = await graph_service.get_user_graph(user_id)
         
-        # 转换为响应格式
+        # 转换为响应格式 - 传递所有属性
         nodes = [
             Entity(
                 id=n.get("id", ""),
                 name=n.get("name", ""),
                 type=n.get("type", "entity"),
-                mention_count=n.get("mention_count", 1)
+                mention_count=n.get("mention_count", 1),
+                first_mentioned_at=n.get("first_mentioned_at"),
+                last_mentioned_at=n.get("last_mentioned_at")
             )
             for n in graph_data.get("nodes", [])
         ]
@@ -81,7 +83,9 @@ async def get_graph(
                 relation_type=e.get("relation_type", "RELATES_TO"),
                 weight=e.get("weight", 1.0),
                 current_weight=e.get("current_weight"),  # 传递衰减后的权重
-                decay_rate=e.get("decay_rate", 0.03)
+                decay_rate=e.get("decay_rate", 0.03),
+                created_at=e.get("created_at"),
+                updated_at=e.get("updated_at")
             )
             for e in graph_data.get("edges", [])
         ]

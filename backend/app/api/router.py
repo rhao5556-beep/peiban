@@ -3,7 +3,7 @@ from fastapi import APIRouter
 
 from app.api.endpoints import (
     conversation, memory, affinity, graph, auth, sse, metrics, profile,
-    content_recommendation, meme, proactive
+    content_recommendation, meme, proactive, evals
 )
 
 api_router = APIRouter()
@@ -40,3 +40,6 @@ api_router.include_router(proactive.router, prefix="/proactive", tags=["主动�
 
 # 监控路由（无需认证）
 api_router.include_router(metrics.router, tags=["监控"])
+
+# 评测辅助路由
+api_router.include_router(evals.router, prefix="/evals", tags=["评测"])

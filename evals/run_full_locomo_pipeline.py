@@ -18,10 +18,18 @@ try:
     from dotenv import load_dotenv
     env_path = Path(__file__).parent / ".env.local"
     if env_path.exists():
-        load_dotenv(env_path)
+        load_dotenv(env_path, override=True)
         print(f"Loaded environment from: {env_path}")
 except ImportError:
     pass  # python-dotenv not installed, use system env vars
+
+
+def _get_env_first(*names: str) -> Optional[str]:
+    for name in names:
+        v = os.environ.get(name)
+        if v:
+            return v
+    return None
 
 
 def check_backend(backend_url: str) -> bool:
@@ -31,29 +39,6 @@ def check_backend(backend_url: str) -> bool:
         return response.status_code == 200
     except Exception:
         return False
-
-
-def _run_cmd_stream(cmd: list[str]) -> tuple[int, str]:
-    env = dict(os.environ)
-    env["PYTHONUNBUFFERED"] = "1"
-    p = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        universal_newlines=True,
-        env=env,
-    )
-    last_nonempty = ""
-    assert p.stdout is not None
-    for line in p.stdout:
-        s = line.rstrip("\n")
-        print(s)
-        if s.strip():
-            last_nonempty = s.strip()
-    rc = p.wait()
-    return rc, last_nonempty
 
 
 def run_evaluation(
@@ -67,39 +52,38 @@ def run_evaluation(
     """Run LoCoMo evaluation"""
     print("[1/4] Running LoCoMo evaluation...")
     
-    project_root = Path(__file__).parent.parent
-    eval_script = project_root / "evals" / "run_locomo10_pipeline.py"
+    # Use the correct path to the evaluation script
+    script_dir = Path(__file__).parent.parent  # Go up to project root
+    eval_script = script_dir / "affinity_evals" / "locomo" / "run_locomo.py"
     
     cmd = [
         sys.executable,
         str(eval_script),
-        "--backend_base_url",
-        backend_url,
-        "--dataset_path",
-        str(dataset_path),
-        "--output_dir",
-        str(output_dir),
-        "--mode",
-        mode,
+        "--backend_base_url", backend_url,
+        "--dataset_path", str(dataset_path),
+        "--output_dir", str(output_dir),
+        "--mode", mode,
         "--eval_mode",
-        "--limit_conversations",
-        str(limit_conversations),
-        "--limit_questions",
-        str(limit_questions),
-        "--sleep_after_memorize_s",
-        "0.5",
-        "--wait_outbox_done_s",
-        "20",
+        "--limit_conversations", str(limit_conversations),
+        "--limit_questions", str(limit_questions),
+        "--chunk_size", "24",
+        "--sleep_after_memorize_s", "0.2",
+        "--wait_outbox_timeout_s", "60",
+        "--wait_outbox_poll_interval_s", "0.2",
+        "--request_timeout_s", "120",
     ]
     
-    rc, last_line = _run_cmd_stream(cmd)
-    if rc != 0:
-        print("ERROR: Evaluation failed!")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        print(f"ERROR: Evaluation failed!")
+        print(result.stderr)
         return None
     
     # Parse output to get the directory
-    if last_line and Path(last_line).exists():
-        return Path(last_line)
+    output_line = result.stdout.strip().split('\n')[-1]
+    if output_line and Path(output_line).exists():
+        return Path(output_line)
     
     # Fallback: find latest directory
     pattern = f"locomo10_{mode}_*"
@@ -154,10 +138,14 @@ def score_with_llm(
     else:
         cmd.append("--no_llm")
     
-    rc, _ = _run_cmd_stream(cmd)
-    if rc != 0:
-        print("ERROR: Scoring failed!")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        print(f"ERROR: Scoring failed!")
+        print(result.stderr)
         return False
+    
+    print(result.stdout)
     return True
 
 
@@ -181,10 +169,14 @@ def generate_report(
         "--output_path", str(output_path),
     ]
     
-    rc, _ = _run_cmd_stream(cmd)
-    if rc != 0:
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
         print(f"Warning: Report generation failed")
+        print(result.stderr)
         return False
+    
+    print(result.stdout)
     return True
 
 
@@ -202,12 +194,18 @@ def main() -> int:
     p.add_argument("--mode", choices=["hybrid", "graph_only"], default="hybrid", help="Retrieval mode")
     p.add_argument("--limit_conversations", type=int, default=0, help="Limit number of conversations (0=all)")
     p.add_argument("--limit_questions", type=int, default=0, help="Limit questions per conversation (0=all)")
-    p.add_argument("--score_only", action="store_true", help="Skip stage 1 and only run scoring/report")
-    p.add_argument("--eval_dir", default="", help="Existing eval output directory (for --score_only)")
     p.add_argument("--no_llm", action="store_true", help="Disable LLM judge (exact match only)")
     p.add_argument("--api_key", default=os.environ.get("OPENAI_API_KEY"), help="API key for LLM judge")
-    p.add_argument("--api_base", default=os.environ.get("OPENAI_API_BASE", "https://api.siliconflow.cn/v1"), help="API base URL")
-    p.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "deepseek-ai/DeepSeek-V3"), help="Judge model")
+    p.add_argument(
+        "--api_base",
+        default=_get_env_first("OPENAI_API_BASE", "OPENAI_BASE_URL") or "https://api.siliconflow.cn/v1",
+        help="API base URL",
+    )
+    p.add_argument(
+        "--model",
+        default=os.environ.get("OPENAI_MODEL", "Pro/deepseek-ai/DeepSeek-V3"),
+        help="Judge model",
+    )
     args = p.parse_args()
     
     print("="*60)
@@ -237,41 +235,23 @@ def main() -> int:
         print(f"- Judge Model: {args.model}")
     print()
     
-    eval_dir: Optional[Path] = None
-    if args.score_only:
-        if args.eval_dir:
-            eval_dir = Path(args.eval_dir)
-        else:
-            output_dir = Path(args.output_dir)
-            pattern = f"locomo10_{args.mode}_*"
-            dirs = sorted(output_dir.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
-            if dirs:
-                eval_dir = dirs[0]
-        if not eval_dir or not eval_dir.exists():
-            print("ERROR: --score_only requires a valid --eval_dir or an existing output directory")
-            return 1
-        print("[1/4] Skipping LoCoMo evaluation (score_only) ✓")
-        print(f"Using output directory: {eval_dir}")
-        print()
-    else:
-        # Run evaluation
-        eval_dir = run_evaluation(
-            backend_url=args.backend_url,
-            dataset_path=Path(args.dataset_path),
-            output_dir=Path(args.output_dir),
-            mode=args.mode,
-            limit_conversations=args.limit_conversations,
-            limit_questions=args.limit_questions,
-        )
+    # Run evaluation
+    eval_dir = run_evaluation(
+        backend_url=args.backend_url,
+        dataset_path=Path(args.dataset_path),
+        output_dir=Path(args.output_dir),
+        mode=args.mode,
+        limit_conversations=args.limit_conversations,
+        limit_questions=args.limit_questions,
+    )
     
     if not eval_dir:
         print("ERROR: Could not find evaluation output directory")
         return 1
     
-    if not args.score_only:
-        print(f"Evaluation completed ✓")
-        print(f"Output directory: {eval_dir}")
-        print()
+    print(f"Evaluation completed ✓")
+    print(f"Output directory: {eval_dir}")
+    print()
     
     # Find model outputs
     model_outputs = find_model_outputs(eval_dir)

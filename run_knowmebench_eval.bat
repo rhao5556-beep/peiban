@@ -88,9 +88,7 @@ echo [✓] 找到最新结果: %LATEST_DIR%
 
 echo.
 echo [3/3] 运行 Judge 评分...
-echo [错误] 本仓库缺少可执行的 official_judge.py 源码，无法在此脚本中运行 Judge。
-echo 建议：使用已有的 Judge 结果文件（如 outputs/knowmebench_run/*/judge_results.json）或补齐 Judge 脚本后再启用该步骤。
-exit /b 1
+python evals/run_knowmebench_official_judge.py --input_dir %LATEST_DIR% --output_file %LATEST_DIR%\judge_results.json --judge_model Pro/deepseek-ai/DeepSeek-V3.2 --concurrency 4
 
 if errorlevel 1 (
     echo [错误] Judge 评分失败！

@@ -1,5 +1,5 @@
 """对话端点"""
-from typing import Optional, Literal, List
+from typing import Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
@@ -9,13 +9,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user
-from app.core.database import get_db, get_neo4j_driver, get_milvus_collection
+from app.core.database import get_db, get_neo4j_driver, get_milvus_collection, get_redis_client
 from app.core.ids import normalize_uuid
 from app.models.session import Session, ConversationTurn
 from app.services.conversation_service import ConversationService, ConversationMode
 from app.services.affinity_service import AffinityService
 from app.services.retrieval_service import RetrievalService
 from app.services.graph_service import GraphService
+from app.services.outbox_service import TransactionManager, IdempotencyChecker
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -28,8 +29,6 @@ class MessageRequest(BaseModel):
     idempotency_key: Optional[str] = None
     mode: Literal["graph_only", "hybrid"] = "hybrid"  # 对话模式
     eval_mode: bool = False
-    eval_task_type: Optional[str] = None
-    eval_evidence_ids: Optional[List[int]] = None
 
 
 class MessageResponse(BaseModel):
@@ -82,24 +81,23 @@ async def send_message(
 
         # 初始化服务
         neo4j_driver = get_neo4j_driver()
-        milvus_collection = None
-        try:
-            milvus_collection = get_milvus_collection()
-        except Exception:
-            milvus_collection = None
+        milvus_collection = get_milvus_collection()
         
         graph_service = GraphService(neo4j_driver=neo4j_driver)
         retrieval_service = RetrievalService(
             milvus_client=milvus_collection,
-            graph_service=graph_service,
-            db_session=db
+            graph_service=graph_service
         )
         affinity_service = AffinityService()
+        transaction_manager = TransactionManager(db_session=db)
+        idempotency_checker = IdempotencyChecker(redis_client=get_redis_client())
         
         conversation_service = ConversationService(
             affinity_service=affinity_service,
             retrieval_service=retrieval_service,
-            graph_service=graph_service
+            graph_service=graph_service,
+            transaction_manager=transaction_manager,
+            idempotency_checker=idempotency_checker,
         )
         
         # 调用对话服务（传递 mode 参数实现物理隔离）
@@ -109,8 +107,6 @@ async def send_message(
             session_id=session_id,
             mode=request.mode,  # graph_only 或 hybrid
             eval_mode=bool(request.eval_mode),
-            eval_task_type=request.eval_task_type,
-            eval_evidence_ids=request.eval_evidence_ids
         )
         
         return MessageResponse(
@@ -129,9 +125,12 @@ async def send_message(
         
     except Exception as e:
         logger.error(f"Conversation processing failed: {e}", exc_info=True)
+        reply = "抱歉，处理消息时出现了问题。请稍后再试。"
+        if bool(request.eval_mode):
+            reply = f"{type(e).__name__}: {e}"
         # 降级响应
         return MessageResponse(
-            reply=f"抱歉，处理消息时出现了问题。请稍后再试。",
+            reply=reply,
             session_id=session_id,
             turn_id=str(uuid.uuid4()),
             emotion={"primary_emotion": "neutral", "valence": 0.0, "confidence": 0.5},
@@ -139,9 +138,7 @@ async def send_message(
             memories_used=[],
             tone_type="friendly",
             response_time_ms=0,
-            memory_status="error",
-            mode=request.mode,
-            context_source={"error": str(e)}
+            memory_status="error"
         )
 
 

@@ -1,5 +1,5 @@
 """记忆端点 - GDPR 合规删除"""
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from datetime import datetime
@@ -27,6 +27,9 @@ class MemoryResponse(BaseModel):
     status: str
     created_at: datetime
     committed_at: Optional[datetime] = None
+    outbox_status: Optional[str] = None
+    outbox_retry_count: Optional[int] = None
+    outbox_error_message: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -47,6 +50,21 @@ class MemorySearchResult(BaseModel):
     affinity_bonus: float
     recency_score: float
     final_score: float
+
+
+class TemporalMemorySearchRequest(BaseModel):
+    query: str = ""
+    top_k: int = 10
+    start_ts: Optional[datetime] = None
+    end_ts: Optional[datetime] = None
+    sort: str = "desc"
+
+
+class TemporalMemorySearchResult(BaseModel):
+    id: str
+    content: str
+    created_at: datetime
+    temporal: Dict[str, Any]
 
 
 class DeleteRequest(BaseModel):
@@ -124,14 +142,27 @@ async def get_memory(
     
     if not memory:
         raise HTTPException(status_code=404, detail="Memory not found")
-    
+
+    from app.models.outbox import OutboxEvent
+    outbox_query = (
+        select(OutboxEvent)
+        .where(OutboxEvent.memory_id == mem_uuid)
+        .order_by(OutboxEvent.created_at.desc())
+        .limit(1)
+    )
+    outbox_result = await db.execute(outbox_query)
+    outbox = outbox_result.scalar_one_or_none()
+
     return MemoryResponse(
         id=str(memory.id),
         content=memory.content,
         valence=memory.valence,
         status=memory.status,
         created_at=memory.created_at,
-        committed_at=memory.committed_at
+        committed_at=memory.committed_at,
+        outbox_status=outbox.status if outbox else None,
+        outbox_retry_count=outbox.retry_count if outbox else None,
+        outbox_error_message=outbox.error_message if outbox else None,
     )
 
 
@@ -215,6 +246,64 @@ async def search_memories(
         )
         for r in results
     ]
+
+
+@router.post("/temporal_search", response_model=List[TemporalMemorySearchResult])
+async def temporal_search_memories(
+    request: TemporalMemorySearchRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    user_id = current_user["user_id"]
+    kw = (request.query or "").strip()
+    kw_like = f"%{kw}%" if kw else ""
+    order_dir = "DESC" if (request.sort or "").lower() != "asc" else "ASC"
+
+    from sqlalchemy import text as sql_text
+
+    sql = sql_text(
+        f"""
+        SELECT
+            id,
+            content,
+            created_at,
+            meta->'temporal' AS temporal
+        FROM memories
+        WHERE user_id = CAST(:user_id AS uuid)
+          AND status != 'deleted'
+          AND meta ? 'temporal'
+          AND (meta->'temporal'->>'precision') IN ('date', 'datetime')
+          AND (:kw_like = '' OR content ILIKE :kw_like)
+          AND (:start_ts IS NULL OR (meta->'temporal'->>'start_ts')::timestamptz >= CAST(:start_ts AS timestamptz))
+          AND (:end_ts IS NULL OR (meta->'temporal'->>'start_ts')::timestamptz <= CAST(:end_ts AS timestamptz))
+        ORDER BY (meta->'temporal'->>'start_ts')::timestamptz {order_dir}, created_at DESC
+        LIMIT :limit
+        """
+    )
+
+    result = await db.execute(
+        sql,
+        {
+            "user_id": user_id,
+            "kw_like": kw_like,
+            "start_ts": request.start_ts.isoformat() if request.start_ts else None,
+            "end_ts": request.end_ts.isoformat() if request.end_ts else None,
+            "limit": int(request.top_k or 10),
+        },
+    )
+    rows = result.fetchall()
+
+    out = []
+    for r in rows:
+        out.append(
+            TemporalMemorySearchResult(
+                id=str(r.id),
+                content=r.content,
+                created_at=r.created_at,
+                temporal=r.temporal or {},
+            )
+        )
+    return out
 
 
 @router.delete("/", response_model=DeletionAuditResponse)

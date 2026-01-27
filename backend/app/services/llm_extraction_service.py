@@ -15,6 +15,8 @@ LLM 实体抽取服务 - 图谱决策器
 import os
 import json
 import logging
+import time
+import random
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, asdict
@@ -35,13 +37,13 @@ MODEL = settings.OPENAI_MODEL or "deepseek-ai/DeepSeek-V3"
 
 SYSTEM_PROMPT = """你是 Affinity 系统的记忆架构师（Graph Decisioner）。你的任务是：
 
-1) 从给定的中文消息中提取实体（Person, Location, Organization, Event, Preference, Other）
+1) 从给定的消息（可能是中文或英文）中提取实体（Person, Location, Organization, Event, Preference, Other）
    和实体间的关系。
 
 2) 执行实体归一化：
    - 如果识别到的实体与 context_entities 中名称相同或语义相近，必须复用其 id
    - 不得创建重复实体
-   - 若无法归一化，基于中文名生成稳定 id（小写拼音/下划线）
+   - 若无法归一化，基于名称生成稳定 id（小写 + 将空格/标点转为下划线；中英文均可）
 
 3) 提取实体间关系（Entity→Entity），不仅仅是用户与实体的关系
    - 例如："二丫喜欢足球" → 二丫 -[LIKES]-> 足球
@@ -83,7 +85,7 @@ SYSTEM_PROMPT = """你是 Affinity 系统的记忆架构师（Graph Decisioner�
       "source": "entity_id_or_user",
       "target": "entity_id",
       "type": "从上面支持的关系类型中选择",
-      "desc": "关系描述（中文）",
+      "desc": "关系描述（尽量用中文；如原文为英文可保留英文关键词；若包含时间/日期/持续时长，请把它写进 desc）",
       "weight": 0.8,
       "confidence": 0.9
     }
@@ -106,8 +108,10 @@ SYSTEM_PROMPT = """你是 Affinity 系统的记忆架构师（Graph Decisioner�
 - 提问句：询问信息，**不能从提问部分创建关系**
   - 包含以下特征的是提问句：
     - 以"？"结尾
+    - 以"?"结尾
     - 包含"吗"、"呢"、"是否"、"是不是"
     - 包含"谁"、"什么"、"哪里"、"怎么"、"为什么"、"多少"
+    - 英文疑问词：who/what/when/where/why/how
     - 包含"认识...吗"、"知道...吗"、"记得...吗"
   - 例如："我认识老师吗？" → 返回空（纯提问）
   - 例如："二丫喜欢什么？" → 返回空（纯提问）
@@ -148,8 +152,8 @@ def extract_ir(
     text: str,
     user_id: str,
     context_entities: List[Dict[str, Any]],
-    max_retries: int = 2,
-    timeout: int = 30
+    max_retries: Optional[int] = None,
+    timeout: Optional[float] = None
 ) -> ExtractionResult:
     """
     调用 LLM 提取实体和关系
@@ -179,6 +183,11 @@ user_id: {user_id}
 {context_part}
 
 请严格按 JSON Schema 输出，提取所有实体和关系（包括实体间关系）。"""
+
+    if max_retries is None:
+        max_retries = int(settings.ENTITY_EXTRACTION_MAX_RETRIES)
+    if timeout is None:
+        timeout = float(settings.ENTITY_EXTRACTION_TIMEOUT_S)
 
     last_error = None
     raw_response = None
@@ -258,15 +267,50 @@ user_id: {user_id}
         except Exception as e:
             last_error = f"API error: {e}"
             logger.warning(f"LLM extraction attempt {attempt + 1} failed: {last_error}")
-        
-        # 重试前等待
-        if attempt < max_retries:
-            import time
-            time.sleep(1 + attempt * 2)
-    
-    # 所有重试都失败
-    logger.error(f"LLM extraction failed after {max_retries + 1} attempts: {last_error}")
-    
+
+        if last_error:
+            low = last_error.lower()
+            if any(x in low for x in ["401", "unauthorized", "invalid api key", "api key"]):
+                break
+            if attempt < max_retries:
+                base = float(settings.ENTITY_EXTRACTION_RETRY_BACKOFF_S)
+                sleep_s = min(5.0, base * (2 ** attempt) + random.random() * 0.2)
+                time.sleep(sleep_s)
+            continue
+
+    if settings.ENTITY_EXTRACTION_FALLBACK_ENABLED:
+        try:
+            from app.services.rule_extraction_service import extract_ir_rule
+
+            entities, relations, conf = extract_ir_rule(text)
+            metadata = {
+                "source": "rule",
+                "model_version": "rule_fallback",
+                "timestamp": datetime.utcnow().isoformat(),
+                "overall_confidence": conf,
+            }
+            user_exists = any(e.get("id") == "user" or e.get("is_user") for e in entities)
+            if not user_exists:
+                entities.insert(
+                    0,
+                    {
+                        "id": "user",
+                        "name": "我",
+                        "type": "Person",
+                        "is_user": True,
+                        "confidence": 1.0,
+                    },
+                )
+            return ExtractionResult(
+                success=True,
+                entities=entities,
+                relations=relations,
+                metadata=metadata,
+                raw_response=None,
+            )
+        except Exception as e:
+            last_error = f"{last_error}; fallback_error: {e}"
+
     return ExtractionResult(
         success=False,
         entities=[],
@@ -276,10 +320,9 @@ user_id: {user_id}
             "model_version": MODEL,
             "timestamp": datetime.utcnow().isoformat(),
             "overall_confidence": 0.0,
-            "error": last_error
         },
         raw_response=raw_response,
-        error=last_error
+        error=last_error,
     )
 
 

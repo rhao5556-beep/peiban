@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>测试内容推荐 API</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        .section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .success {
+            background-color: #d4edda;
+            border-color: #c3e6cb;
+        }
+        .error {
+            background-color: #f8d7da;
+            border-color: #f5c6cb;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+        }
+        pre {
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>内容推荐 API 测试</h1>
+    
+    <div class="section">
+        <h2>1. 获取 Token</h2>
+        <button onclick="getToken()">获取 Token</button>
+        <div id="token-result"></div>
+    </div>
+    
+    <div class="section">
+        <h2>2. 获取偏好设置</h2>
+        <button onclick="getPreference()">获取偏好</button>
+        <div id="preference-result"></div>
+    </div>
+    
+    <div class="section">
+        <h2>3. 更新偏好设置</h2>
+        <button onclick="updatePreference()">启用推荐</button>
+        <div id="update-result"></div>
+    </div>
+    
+    <div class="section">
+        <h2>4. 获取推荐列表</h2>
+        <button onclick="getRecommendations()">获取推荐</button>
+        <div id="recommendations-result"></div>
+    </div>
+
+    <script>
+        let token = '';
+        const API_BASE = 'http://localhost:8000/api/v1';
+
+        async function getToken() {
+            const resultDiv = document.getElementById('token-result');
+            try {
+                const response = await fetch(`${API_BASE}/auth/token`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    token = data.access_token;
+                    resultDiv.innerHTML = `<div class="success">
+                        <p>✓ Token 获取成功</p>
+                        <pre>${token.substring(0, 50)}...</pre>
+                    </div>`;
+                } else {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ 错误: ${error.message}</div>`;
+            }
+        }
+
+        async function getPreference() {
+            const resultDiv = document.getElementById('preference-result');
+            if (!token) {
+                resultDiv.innerHTML = '<div class="error">请先获取 Token</div>';
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/content/preference`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.innerHTML = `<div class="success">
+                        <p>✓ 偏好设置获取成功</p>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    </div>`;
+                } else {
+                    const error = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${error}`);
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ 错误: ${error.message}</div>`;
+            }
+        }
+
+        async function updatePreference() {
+            const resultDiv = document.getElementById('update-result');
+            if (!token) {
+                resultDiv.innerHTML = '<div class="error">请先获取 Token</div>';
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/content/preference`, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        content_recommendation_enabled: true,
+                        max_daily_recommendations: 3
+                    })
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.innerHTML = `<div class="success">
+                        <p>✓ 偏好设置更新成功</p>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    </div>`;
+                } else {
+                    const error = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${error}`);
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ 错误: ${error.message}</div>`;
+            }
+        }
+
+        async function getRecommendations() {
+            const resultDiv = document.getElementById('recommendations-result');
+            if (!token) {
+                resultDiv.innerHTML = '<div class="error">请先获取 Token</div>';
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/content/recommendations`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    resultDiv.innerHTML = `<div class="success">
+                        <p>✓ 推荐列表获取成功 (${data.length} 条)</p>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    </div>`;
+                } else {
+                    const error = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${error}`);
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">❌ 错误: ${error.message}</div>`;
+            }
+        }
+
+        // 自动获取 token
+        window.onload = () => {
+            getToken();
+        };
+    </script>
+</body>
+</html>

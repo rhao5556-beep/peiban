@@ -1,7 +1,7 @@
 """记忆模型"""
 from datetime import datetime
 from sqlalchemy import Column, String, DateTime, Text, Float, ForeignKey, JSON
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
 import uuid
@@ -20,8 +20,8 @@ class Memory(Base):
     valence = Column(Float, nullable=True)  # 情感正负向 [-1, 1]
     status = Column(String(20), default="pending")  # pending, committed, deleted
     conversation_id = Column(UUID(as_uuid=True), nullable=True)
+    meta = Column(JSONB, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow)
-    observed_at = Column(DateTime, nullable=True)
     committed_at = Column(DateTime, nullable=True)
     
     # 关系

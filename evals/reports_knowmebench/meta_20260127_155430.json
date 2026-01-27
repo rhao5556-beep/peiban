@@ -1,0 +1,21 @@
+{
+  "timestamp": "20260127_155430",
+  "run_dir": "outputs\\knowmebench_run\\ds1_pipeline_graph_only_20260127_155019",
+  "judge_file": "outputs\\knowmebench_run\\ds1_pipeline_graph_only_20260127_155019\\judge_results.json",
+  "merged_file": "outputs\\knowmebench_run\\ds1_pipeline_graph_only_20260127_155019\\merged_for_official_eval.json",
+  "judge_model": "Pro/deepseek-ai/DeepSeek-V3.2",
+  "total_items": 3,
+  "evaluated_items": 3,
+  "average_score": 0.0,
+  "per_task": [
+    {
+      "task_type": "Temporal Reasoning",
+      "total_items": 3,
+      "evaluated_items": 3,
+      "average_score": 0.0,
+      "low_score_count": 3,
+      "high_score_count": 0
+    }
+  ],
+  "report_path": "C:\\Users\\murphy\\Desktop\\陪伴项目\\evals\\reports_knowmebench\\report_20260127_155430.md"
+}

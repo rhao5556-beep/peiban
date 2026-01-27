@@ -20,7 +20,7 @@ try:
     from dotenv import load_dotenv
     env_path = Path(__file__).parent / ".env.local"
     if env_path.exists():
-        load_dotenv(env_path)
+        load_dotenv(env_path, override=True)
 except ImportError:
     pass  # python-dotenv not installed, use system env vars
 
@@ -54,7 +54,16 @@ CATEGORY_NAMES = {
     2: "Temporal Understanding",
     3: "Reasoning & Inference",
     4: "Detailed Understanding",
+    5: "Unknown / Unanswerable",
 }
+
+
+def _get_env_first(*names: str) -> Optional[str]:
+    for name in names:
+        v = os.environ.get(name)
+        if v:
+            return v
+    return None
 
 
 def _load_json(path: Path) -> Any:
@@ -96,56 +105,45 @@ def _to_iso_date(s: str) -> Optional[str]:
 
 def _exact_match_score(reference: str, prediction: str, category: Optional[int]) -> bool:
     """Simple exact match scoring (fallback)"""
+    if category == 5 or not (reference or "").strip():
+        return False
     if category == 2:  # Temporal
         ref_iso = _to_iso_date(reference)
         pred_iso = _to_iso_date(prediction)
         if ref_iso and pred_iso:
             return ref_iso == pred_iso
-        ref_y = (reference or "").strip()
-        if ref_y.isdigit() and len(ref_y) == 4:
-            return ref_y in (prediction or "")
     
     ref_n = _normalize_text(reference)
     pred_n = _normalize_text(prediction)
     return bool(ref_n) and ref_n == pred_n
 
 
-def _heuristic_match_score(reference: str, prediction: str, category: Optional[int]) -> bool:
-    ref = (reference or "").strip()
-    pred = (prediction or "").strip()
-    if not ref:
-        return False
-
-    pred_l = pred.lower()
-    if any(x in pred_l for x in ["don't have enough information", "do not have enough information", "not specified", "cannot determine", "i don't know"]):
-        return False
-
-    if category == 2:
-        ref_iso = _to_iso_date(ref)
-        pred_iso = _to_iso_date(pred)
-        if ref_iso and pred_iso:
-            return ref_iso == pred_iso
-        if ref.isdigit() and len(ref) == 4:
-            return ref in pred
-
-    ref_n = _normalize_text(ref)
-    pred_n = _normalize_text(pred)
-    if not ref_n or not pred_n:
-        return False
-    if ref_n in pred_n:
+def _is_refusal(prediction: str) -> bool:
+    p = _normalize_text(prediction)
+    if not p:
         return True
-
-    parts = [p.strip() for p in re.split(r"[,\n;/]|\\band\\b|\\bor\\b", ref_n) if p.strip()]
-    if len(parts) >= 2:
-        hit = sum(1 for p in parts if p and p in pred_n)
-        return hit >= max(1, int(0.6 * len(parts)))
-
-    ref_tokens = set(ref_n.split())
-    pred_tokens = set(pred_n.split())
-    if not ref_tokens:
-        return False
-    overlap = len(ref_tokens & pred_tokens) / max(1, len(ref_tokens))
-    return overlap >= 0.6
+    cues = [
+        "i dont know",
+        "i do not know",
+        "dont know",
+        "do not know",
+        "unknown",
+        "not sure",
+        "cannot determine",
+        "cant determine",
+        "cannot answer",
+        "cant answer",
+        "no information",
+        "insufficient information",
+        "不知道",
+        "不清楚",
+        "无法确定",
+        "无法判断",
+        "无法回答",
+        "没有信息",
+        "信息不足",
+    ]
+    return any(c in p for c in cues)
 
 
 def _call_llm_judge(
@@ -178,6 +176,7 @@ Evaluation Guidelines:
 - For Temporal Understanding (Category 2): Check if dates/times are equivalent (e.g., "7 May 2023" = "May 7, 2023")
 - For Reasoning & Inference (Category 3): Check if the reasoning is sound and conclusion matches
 - For Detailed Understanding (Category 4): Check if the answer captures the essential details
+- For Unknown/Unanswerable (Category 5) OR when Reference Answer is empty/null: the correct behavior is to refuse (e.g., "I don't know") rather than hallucinate.
 
 Respond in JSON format:
 {{
@@ -228,49 +227,11 @@ Be strict but fair. Minor paraphrasing is acceptable if the meaning is preserved
     except Exception as e:
         print(f"Warning: LLM judge failed: {e}")
         # Fallback to exact match
+        if category == 5 or not (reference_answer or "").strip():
+            ok = _is_refusal(model_answer)
+            return ok, 1.0 if ok else 0.0, f"Fallback refusal-check due to error: {e}"
         exact = _exact_match_score(reference_answer, model_answer, category)
         return exact, 1.0 if exact else 0.0, f"Fallback to exact match due to error: {e}"
-
-
-def _resolve_env(*names: str) -> Optional[str]:
-    for n in names:
-        v = os.environ.get(n)
-        if v is not None and str(v).strip():
-            return str(v).strip()
-    return None
-
-
-def _mask_key(k: str) -> str:
-    s = str(k or "")
-    if len(s) <= 10:
-        return "*" * len(s)
-    return f"{s[:6]}...{s[-4:]}"
-
-
-def _preflight_llm(api_key: str, api_base: str, model: str) -> Tuple[bool, str]:
-    url = f"{api_base.rstrip('/')}/chat/completions"
-    try:
-        r = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "temperature": 0.0,
-                "max_tokens": 1,
-            },
-            timeout=20,
-        )
-        if r.status_code in (401, 403):
-            body = (r.text or "").strip()
-            return False, f"auth_failed http_{r.status_code}: {body[:300]}"
-        r.raise_for_status()
-        return True, "ok"
-    except Exception as e:
-        return False, f"preflight_error: {e}"
 
 
 @dataclass(frozen=True)
@@ -309,26 +270,22 @@ def score_outputs_with_llm(
     
     for i, it in enumerate(items):
         qid = int(it.get("id") or 0)
-        cat_raw = it.get("category")
-        meta = it.get("meta") or {}
-        if not isinstance(meta, dict):
-            meta = {}
-        task_type = str(it.get("task_type") or meta.get("task_type") or "")
         question = str(it.get("question") or "")
         ref = str(it.get("reference_answer") or "")
         pred = str(it.get("model_answer") or "")
-        category: Optional[int] = None
-        if isinstance(cat_raw, int):
-            category = int(cat_raw)
-        else:
+        meta = it.get("meta") or {}
+        cat = it.get("category")
+        if cat is None:
             cat = meta.get("category")
-            category = int(cat) if isinstance(cat, int) else None
-        if not task_type and category in CATEGORY_NAMES:
-            task_type = CATEGORY_NAMES.get(category, "")
+        category: Optional[int] = None
+        if isinstance(cat, int):
+            category = cat
+        elif isinstance(cat, str) and cat.strip().isdigit():
+            category = int(cat.strip())
+        task_type = str(it.get("task_type") or "") or CATEGORY_NAMES.get(category or 0, "Unknown")
         
         # Always compute exact match
         exact_match = _exact_match_score(ref, pred, category)
-        heuristic_match = _heuristic_match_score(ref, pred, category)
         
         # Use LLM judge if enabled
         if use_llm and api_key and api_base and model:
@@ -352,9 +309,9 @@ def score_outputs_with_llm(
                 confidence = 1.0 if exact_match else 0.0
                 reasoning = f"Fallback to exact match due to error"
         else:
-            correct = heuristic_match
-            confidence = 1.0 if heuristic_match else 0.0
-            reasoning = "Heuristic scoring (no LLM)"
+            correct = exact_match
+            confidence = 1.0 if exact_match else 0.0
+            reasoning = "Exact match scoring"
         
         scored.append(
             ScoredItem(
@@ -393,7 +350,7 @@ def score_outputs_with_llm(
         by_task[t]["confidence_sum"] += s.confidence
         
         c = str(s.category) if s.category is not None else "unknown"
-        cat_name = CATEGORY_NAMES.get(s.category, "Unknown") if s.category else "Unknown"
+        cat_name = CATEGORY_NAMES.get(s.category, "Unknown") if s.category is not None else "Unknown"
         by_cat.setdefault(c, {
             "category_name": cat_name,
             "total": 0,
@@ -425,7 +382,7 @@ def score_outputs_with_llm(
         "accuracy": accuracy,
         "exact_match_accuracy": exact_match_acc,
         "avg_confidence": avg_confidence,
-        "scoring_method": "llm_judge" if use_llm else "heuristic",
+        "scoring_method": "llm_judge" if use_llm else "exact_match",
         "by_task_type": dict(sorted(by_task.items(), key=lambda kv: kv[0])),
         "by_category": dict(sorted(by_cat.items(), key=lambda kv: kv[0])),
     }
@@ -441,19 +398,18 @@ def main() -> None:
     p.add_argument("--detailed_out_path", default="", help="Path to save detailed scores")
     p.add_argument("--use_llm", action="store_true", default=True, help="Use LLM judge")
     p.add_argument("--no_llm", action="store_true", help="Disable LLM judge (exact match only)")
-    p.add_argument("--api_key", default=_resolve_env("AFFINITY_EVAL_OPENAI_API_KEY", "OPENAI_API_KEY"), help="API key")
+    p.add_argument("--api_key", default=os.environ.get("OPENAI_API_KEY"), help="API key")
     p.add_argument(
         "--api_base",
-        default=_resolve_env("AFFINITY_EVAL_OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_BASE_URL") or "https://api.siliconflow.cn/v1",
+        default=_get_env_first("OPENAI_API_BASE", "OPENAI_BASE_URL") or "https://api.siliconflow.cn/v1",
         help="API base URL",
     )
     p.add_argument(
         "--model",
-        default=_resolve_env("AFFINITY_EVAL_JUDGE_MODEL", "OPENAI_MODEL") or "deepseek-ai/DeepSeek-V3",
+        default=os.environ.get("OPENAI_MODEL", "Pro/deepseek-ai/DeepSeek-V3"),
         help="Judge model",
     )
     p.add_argument("--rate_limit_delay", type=float, default=0.1, help="Delay between API calls")
-    p.add_argument("--skip_preflight", action="store_true", help="Skip LLM auth preflight check")
     args = p.parse_args()
     
     use_llm = args.use_llm and not args.no_llm
@@ -461,20 +417,6 @@ def main() -> None:
     if use_llm and not args.api_key:
         print("Warning: No API key provided, falling back to exact match scoring")
         use_llm = False
-    elif use_llm and (not args.skip_preflight):
-        ok, msg = _preflight_llm(args.api_key, args.api_base, args.model)
-        if not ok:
-            print("ERROR: LLM judge preflight failed (will not waste time scoring item-by-item).")
-            print(f"- api_base: {args.api_base}")
-            print(f"- model: {args.model}")
-            print(f"- api_key: {_mask_key(args.api_key)}")
-            print(f"- details: {msg}")
-            print()
-            print("Fix suggestions:")
-            print("- Verify your SiliconFlow API key has access to the judge model.")
-            print("- Ensure you are using the correct env vars: AFFINITY_EVAL_OPENAI_API_KEY / AFFINITY_EVAL_OPENAI_BASE_URL.")
-            print("- If you just want to finish quickly, rerun with --no_llm (exact match).")
-            raise SystemExit(2)
     
     in_path = Path(args.in_path)
     items = _load_json(in_path)
@@ -482,7 +424,7 @@ def main() -> None:
         raise RuntimeError("in_path must be a JSON list of model outputs")
     
     print(f"Scoring {len(items)} items...")
-    print(f"Scoring method: {'LLM Judge' if use_llm else 'Heuristic (no LLM)'}")
+    print(f"Scoring method: {'LLM Judge' if use_llm else 'Exact Match'}")
     if use_llm:
         print(f"Judge model: {args.model}")
     

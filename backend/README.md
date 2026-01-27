@@ -7,7 +7,6 @@
 - **动态记忆图谱**: Neo4j 存储实体关系，边权重随时间衰减，提及时刷新
 - **好感度系统**: 量化 AI 对用户的情感倾向，影响检索策略和对话语气
 - **Hybrid Retrieval**: Vector + Graph 混合检索，结合好感度 Re-rank
-- **联网搜索回退**: 当无相关长期记忆时，可用 Tavily 补充通用知识（默认关闭）
 - **流式输出**: SSE 支持实时对话体验
 - **最终一致性**: Outbox 模式确保数据一致性
 
@@ -37,10 +36,6 @@ cd affinity
 cp .env.example .env
 # 编辑 .env 填入必要配置
 ```
-
-可选功能（默认关闭）：
-
-- 联网搜索（Tavily）：设置 `WEB_SEARCH_ENABLED=true`，并填写 `TAVILY_API_KEY`
 
 ### 2. 启动服务
 

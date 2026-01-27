@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Sender, MemoryState } from '../types';
-import type { Message } from '../types';
+import type { Message, StreamEvent } from '../types';
 import { api } from '../services/api';
 import MemoryStatus from './MemoryStatus';
-import MemeDisplay from './MemeDisplay';
 import { Send, Activity, Zap } from 'lucide-react';
 
 interface ChatInterfaceProps {
@@ -89,36 +88,25 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onMemoryUpdate }) => {
               memoryId: event.memory_id 
             } : msg
           ));
-        } else if (event.type === 'meme') {
-          const meta = event.metadata || {};
-          if (meta.usage_id && meta.description) {
-            setMessages(prev => prev.map(msg =>
-              msg.id === aiMsgId ? {
-                ...msg,
-                meme: {
-                  memeId: meta.meme_id || '',
-                  usageId: meta.usage_id,
-                  description: meta.description,
-                  imageUrl: meta.image_url
-                }
-              } : msg
-            ));
+        } else if (event.type === 'memory_committed') {
+          const committedId = event.memory_id || memoryPendingId;
+          if (committedId) {
+            memoryPendingId = committedId;
           }
-        } else if (event.type === 'error') {
           setMessages(prev => prev.map(msg =>
-            msg.id === aiMsgId ? { ...msg, text: event.content || '连接异常。', isTyping: false } : msg
+            msg.id === aiMsgId ? {
+              ...msg,
+              memoryState: MemoryState.COMMITTED,
+              memoryId: committedId || msg.memoryId
+            } : msg
           ));
-          break;
+          onMemoryUpdate();
         } else if (event.type === 'done') {
           setMessages(prev => prev.map(msg => 
             msg.id === aiMsgId ? { ...msg, isTyping: false } : msg
           ));
         }
       }
-
-      setMessages(prev => prev.map(msg =>
-        msg.id === aiMsgId ? { ...msg, isTyping: false } : msg
-      ));
 
       // 4. Trigger Polling if Memory is Pending (Slow Path / Fallback)
       if (memoryPendingId) {
@@ -181,18 +169,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onMemoryUpdate }) => {
               {msg.text}
               {msg.isTyping && <span className="inline-block w-1.5 h-3 ml-1 bg-gray-400 animate-pulse align-middle"></span>}
             </div>
-
-            {msg.sender === Sender.AI && msg.meme && (
-              <div className="max-w-[85%]">
-                <MemeDisplay
-                  description={msg.meme.description}
-                  imageUrl={msg.meme.imageUrl}
-                  onFeedback={(action) => {
-                    api.submitMemeFeedback(msg.meme!.usageId, action).catch((e) => console.error(e));
-                  }}
-                />
-              </div>
-            )}
             
             {/* Memory State Indicator */}
             {msg.sender === Sender.AI && msg.memoryState && msg.memoryState !== MemoryState.NONE && (
