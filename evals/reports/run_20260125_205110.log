@@ -1,0 +1,11 @@
+backend_base_url=http://localhost:8010
+enable_judge=False
+judge_model=gpt-4o-mini
+openai_base_url=https://api.openai.com/v1
+run_ltm=False
+[affinity_short_term_recall] str_name score=1 expected=小明 output=你叫小明。
+[affinity_short_term_recall] str_city score=1 expected=沈阳 output=沈阳。
+[affinity_short_term_recall] str_pet score=1 expected=团子 output=团子。
+[affinity_memory_honesty] mh_unknown_birthplace score=1 expected=不知道 output=我不知道，你可以告诉我吗？
+[affinity_memory_honesty] mh_unknown_job score=1 expected=不知道 output=我不知道你目前在做什么工作，可以告诉我一些关于你的工作吗？
+[affinity_memory_honesty] mh_unknown_age score=1 expected=不知道 output=我不知道你今年多大。如果你想告诉我，或者我们可以在聊天中提到这个，你愿意分享吗？

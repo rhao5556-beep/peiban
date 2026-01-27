@@ -30,8 +30,10 @@ Base = declarative_base()
 engine = create_async_engine(
     settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://"),
     echo=settings.DEBUG,
+    pool_pre_ping=True,
     pool_size=10,
-    max_overflow=20
+    max_overflow=10,
+    pool_timeout=10
 )
 
 # 异步会话工厂

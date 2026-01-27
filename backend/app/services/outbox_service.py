@@ -1,4 +1,5 @@
 """Outbox 服务 - 事务管理器"""
+import asyncio
 import uuid
 import json
 import logging
@@ -38,6 +39,8 @@ class TransactionManager:
     def __init__(self, db_session: AsyncSession = None):
         self.db = db_session
     
+    _memories_has_observed_at: Optional[bool] = None
+    
     async def create_memory_with_outbox(
         self,
         user_id: str,
@@ -46,6 +49,7 @@ class TransactionManager:
         valence: float,
         conversation_id: str,
         idempotency_key: str,
+        observed_at: Optional[datetime] = None,
         entities: List[Dict] = None,
         edges: List[Dict] = None
     ) -> Tuple[str, str]:
@@ -81,6 +85,7 @@ class TransactionManager:
             "embedding": embedding,
             "valence": valence,
             "conversation_id": conversation_id,
+            "observed_at": observed_at.isoformat() if observed_at else None,
             "entities": entities or [],
             "edges": edges or []
         }
@@ -94,25 +99,54 @@ class TransactionManager:
             # 1. 写入 pending 状态的 memory
             # 将 embedding list 转换为 pgvector 格式的字符串
             embedding_str = str(embedding) if embedding else None
-            created_at = (
+            has_observed_at = self.__class__._memories_has_observed_at
+            if has_observed_at is None:
+                has_observed_at = False
+                try:
+                    r = await self.db.execute(
+                        text("""
+                            SELECT 1
+                            FROM information_schema.columns
+                            WHERE table_name = 'memories' AND column_name = 'observed_at'
+                            LIMIT 1
+                        """)
+                    )
+                    has_observed_at = r.first() is not None
+                except Exception:
+                    has_observed_at = False
+                self.__class__._memories_has_observed_at = has_observed_at
+            
+            if has_observed_at:
                 await self.db.execute(
-                text("""
-                    INSERT INTO memories (id, user_id, content, embedding, valence, status, conversation_id, created_at)
-                    VALUES (:id, :user_id, :content, :embedding, :valence, 'pending', :conversation_id, NOW())
-                    RETURNING created_at
-                """),
-                {
-                    "id": memory_id,
-                    "user_id": user_id,
-                    "content": content,
-                    "embedding": embedding_str,
-                    "valence": valence,
-                    "conversation_id": conversation_id
-                }
+                    text("""
+                        INSERT INTO memories (id, user_id, content, embedding, valence, status, conversation_id, created_at, observed_at)
+                        VALUES (:id, :user_id, :content, :embedding, :valence, 'pending', :conversation_id, NOW(), COALESCE(:observed_at, NOW()))
+                    """),
+                    {
+                        "id": memory_id,
+                        "user_id": user_id,
+                        "content": content,
+                        "embedding": embedding_str,
+                        "valence": valence,
+                        "conversation_id": conversation_id,
+                        "observed_at": observed_at
+                    }
                 )
-            ).scalar_one()
-
-            payload["created_at"] = int(created_at.timestamp())
+            else:
+                await self.db.execute(
+                    text("""
+                        INSERT INTO memories (id, user_id, content, embedding, valence, status, conversation_id, created_at)
+                        VALUES (:id, :user_id, :content, :embedding, :valence, 'pending', :conversation_id, NOW())
+                    """),
+                    {
+                        "id": memory_id,
+                        "user_id": user_id,
+                        "content": content,
+                        "embedding": embedding_str,
+                        "valence": valence,
+                        "conversation_id": conversation_id
+                    }
+                )
             
             # 2. 写入 outbox 事件
             await self.db.execute(
@@ -380,16 +414,29 @@ class IdempotencyChecker:
     redis.call('SET', key, value, 'EX', ttl)
     return nil  -- 新创建，返回 nil
     """
+
+    _shared_script_sha: Optional[str] = None
+    _shared_script_lock = asyncio.Lock()
     
     def __init__(self, redis_client=None):
         self.redis = redis_client
         self.ttl = 86400  # 24 hours
-        self._script_sha = None
+        self._script_sha = self.__class__._shared_script_sha
     
     async def _ensure_script(self):
         """确保 Lua 脚本已加载"""
-        if self._script_sha is None and self.redis:
-            self._script_sha = await self.redis.script_load(self.CHECK_AND_SET_SCRIPT)
+        if not self.redis:
+            return
+        if self.__class__._shared_script_sha is not None:
+            self._script_sha = self.__class__._shared_script_sha
+            return
+        async with self.__class__._shared_script_lock:
+            if self.__class__._shared_script_sha is None:
+                self.__class__._shared_script_sha = await asyncio.wait_for(
+                    self.redis.script_load(self.CHECK_AND_SET_SCRIPT),
+                    timeout=2.0,
+                )
+            self._script_sha = self.__class__._shared_script_sha
     
     async def check_and_acquire(
         self, 
@@ -419,8 +466,9 @@ class IdempotencyChecker:
             await self._ensure_script()
             
             # 执行 Lua 脚本
-            result = await self.redis.evalsha(
-                self._script_sha, 1, key, value, self.ttl
+            result = await asyncio.wait_for(
+                self.redis.evalsha(self._script_sha, 1, key, value, self.ttl),
+                timeout=2.0,
             )
             
             if result is None:
@@ -443,11 +491,11 @@ class IdempotencyChecker:
         key = f"idempotency:{idempotency_key}"
         
         try:
-            existing = await self.redis.get(key)
+            existing = await asyncio.wait_for(self.redis.get(key), timeout=2.0)
             if existing:
                 data = json.loads(existing)
                 data["memory_id"] = memory_id
-                await self.redis.set(key, json.dumps(data), ex=self.ttl)
+                await asyncio.wait_for(self.redis.set(key, json.dumps(data), ex=self.ttl), timeout=2.0)
             return True
         except Exception as e:
             logger.error(f"Failed to set memory_id: {e}")
@@ -460,7 +508,7 @@ class IdempotencyChecker:
         
         key = f"idempotency:{idempotency_key}"
         try:
-            await self.redis.delete(key)
+            await asyncio.wait_for(self.redis.delete(key), timeout=2.0)
             return True
         except Exception as e:
             logger.error(f"Failed to release idempotency key: {e}")

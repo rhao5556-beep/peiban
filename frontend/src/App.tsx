@@ -6,7 +6,6 @@ import AffinityDashboard from './components/AffinityDashboard';
 import { ContentRecommendation } from './components/ContentRecommendation';
 import { ContentPreferenceSettings } from './components/ContentPreferenceSettings';
 import { MemePreferenceSettings } from './components/MemePreferenceSettings';
-import { MemeTrending } from './components/MemeTrending';
 import ProactiveNotification from './components/ProactiveNotification';
 import ProactiveSettings from './components/ProactiveSettings';
 import { api } from './services/api';
@@ -179,7 +178,6 @@ export default function App() {
               <ContentRecommendation />
               <ContentPreferenceSettings />
               <MemePreferenceSettings />
-              <MemeTrending />
             </div>
           </div>
         ) : (

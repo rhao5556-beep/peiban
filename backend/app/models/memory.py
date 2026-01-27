@@ -21,6 +21,7 @@ class Memory(Base):
     status = Column(String(20), default="pending")  # pending, committed, deleted
     conversation_id = Column(UUID(as_uuid=True), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    observed_at = Column(DateTime, nullable=True)
     committed_at = Column(DateTime, nullable=True)
     
     # 关系

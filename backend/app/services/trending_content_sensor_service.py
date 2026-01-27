@@ -68,7 +68,7 @@ class MemeCandidate:
         return {
             "text_description": self.text_description,
             "source_platform": self.source_platform,
-            "initial_popularity_score": self.initial_popularity_score,
+            "popularity_score": self.initial_popularity_score,
             "image_url": self.image_url,
             "original_source_url": self.original_source_url,
             "category": self.category,
@@ -86,6 +86,19 @@ WEIBO_RATE_LIMIT = 5
 
 # 缓存时长（秒）
 CACHE_DURATION_SECONDS = 3600  # 1小时
+
+FALLBACK_TREND_PHRASES = [
+    "笑死",
+    "无语",
+    "我真的会谢",
+    "破防了",
+    "yyds",
+    "救命",
+    "懂的都懂",
+    "蚌埠住了",
+    "离谱",
+    "太真实了",
+]
 
 
 # ==================== 热点内容感知服务 ====================
@@ -145,7 +158,20 @@ class TrendingContentSensorService:
             f"after dedup: {len(unique_candidates)}"
         )
         
-        return unique_candidates
+        if unique_candidates:
+            return unique_candidates
+
+        return [
+            MemeCandidate(
+                text_description=phrase,
+                source_platform="fallback",
+                initial_popularity_score=50.0,
+                image_url=None,
+                original_source_url=None,
+                category=self._classify_content(phrase)
+            )
+            for phrase in FALLBACK_TREND_PHRASES
+        ]
     
     # ==================== 微博热搜抓取 ====================
     

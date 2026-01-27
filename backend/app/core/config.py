@@ -44,17 +44,22 @@ class Settings(BaseSettings):
     ENTITY_EXTRACTION_TIMEOUT_S: float = 0.8
     ENTITY_EXTRACTION_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
 
-    LLM_STRICT_MODE: bool = False
-
-    INTENT_ROUTER_ENABLED: bool = True
-    INTENT_ROUTER_LLM_FALLBACK_ENABLED: bool = True
-    INTENT_ROUTER_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
-    INTENT_ROUTER_THRESHOLD: float = 0.6
-    INTENT_ROUTER_TIMEOUT_S: float = 0.6
-
     # 图谱事实检索降级配置
     GRAPH_FACTS_ENABLED: bool = True
     GRAPH_FACTS_TIMEOUT_S: float = 0.9
+
+    # 联网搜索（Tavily）
+    WEB_SEARCH_ENABLED: bool = False
+    TAVILY_API_KEY: str = ""
+    TAVILY_API_BASE_URL: str = "https://api.tavily.com"
+    TAVILY_MAX_RESULTS: int = 5
+    TAVILY_SEARCH_TIMEOUT_S: float = 3.0
+    # 兼容额外环境变量（避免 Pydantic 严格模式报错）
+    CONTENT_PUBLISHER_WEIGHTS: str = ""
+    TAVILY_ENABLED: bool = False
+    TAVILY_SEARCH_DEPTH: str = "basic"
+    TAVILY_INCLUDE_ANSWER: bool = False
+    CONTENT_RSS_EXTRA_FEEDS: str = ""
     
     # CORS 配置 (支持常见前端端口)
     CORS_ORIGINS: List[str] = [
@@ -68,7 +73,7 @@ class Settings(BaseSettings):
     ]
     
     # Rate Limiting
-    RATE_LIMIT_PER_MINUTE: int = 100
+    RATE_LIMIT_PER_MINUTE: int = 100000
     
     # Outbox 配置
     OUTBOX_MAX_RETRIES: int = 5
@@ -112,7 +117,6 @@ class Settings(BaseSettings):
     class Config:
         env_file = str(Path(__file__).resolve().parents[2] / ".env")
         case_sensitive = True
-        extra = "ignore"
 
 
 @lru_cache()

@@ -43,10 +43,10 @@ echo 并发: %CONCURRENCY%
 
 if "%1"=="quick" (
     echo 类型: 快速测试（每个任务 3 题）
-    python affinity_evals/knowmebench/run_dataset1_pipeline.py --backend_base_url %BACKEND_URL% --mode %MODE% --eval_mode --limit_per_task 3 --concurrency %CONCURRENCY%
+    python evals/run_knowmebench_dataset1_pipeline.py --backend_base_url %BACKEND_URL% --mode %MODE% --eval_mode --limit_per_task 3 --concurrency %CONCURRENCY%
 ) else if "%1"=="full" (
     echo 类型: 完整评测（所有题目）
-    python affinity_evals/knowmebench/run_dataset1_pipeline.py --backend_base_url %BACKEND_URL% --mode %MODE% --eval_mode --concurrency %CONCURRENCY%
+    python evals/run_knowmebench_dataset1_pipeline.py --backend_base_url %BACKEND_URL% --mode %MODE% --eval_mode --concurrency %CONCURRENCY%
 ) else (
     echo [错误] 未知参数: %1
     exit /b 1
@@ -88,7 +88,9 @@ echo [✓] 找到最新结果: %LATEST_DIR%
 
 echo.
 echo [3/3] 运行 Judge 评分...
-python affinity_evals/knowmebench/official_judge.py --input_dir %LATEST_DIR% --output_file %LATEST_DIR%\judge_results.json --concurrency 4
+echo [错误] 本仓库缺少可执行的 official_judge.py 源码，无法在此脚本中运行 Judge。
+echo 建议：使用已有的 Judge 结果文件（如 outputs/knowmebench_run/*/judge_results.json）或补齐 Judge 脚本后再启用该步骤。
+exit /b 1
 
 if errorlevel 1 (
     echo [错误] Judge 评分失败！

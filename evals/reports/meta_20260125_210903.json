@@ -1,0 +1,1 @@
+{"AFFINITY_EVAL_ENABLE_JUDGE": "1", "AFFINITY_EVAL_ENABLE_BASELINE": "1", "AFFINITY_EVAL_RUN_LTM": "1", "OPENAI_API_BASE": "https://api.openai.com/v1", "AFFINITY_EVAL_JUDGE_MODEL": "gpt-4o-mini", "AFFINITY_EVAL_BASELINE_MODEL": "gpt-4o-mini", "backend_base_url": "http://localhost:8010", "run_log": "C:\\Users\\murphy\\Desktop\\陪伴项目\\evals\\reports\\run_20260125_210903.log"}

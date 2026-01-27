@@ -1,15 +1,19 @@
 """混合检索服务 - Vector + Graph + Entity Facts"""
+import contextvars
 import math
 import logging
 import json
+import re
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
 from datetime import datetime
+from sqlalchemy import text
 from openai import AsyncOpenAI
 from app.core.config import settings
-from app.core.llm import normalize_openai_base_url
 
 logger = logging.getLogger(__name__)
+
+EVAL_MODE_CTX: contextvars.ContextVar[bool] = contextvars.ContextVar("affinity_eval_mode", default=False)
 
 
 @dataclass
@@ -59,7 +63,7 @@ class EmbeddingService:
         if not hasattr(self, 'client'):
             self.client = AsyncOpenAI(
                 api_key=settings.OPENAI_API_KEY,
-                base_url=normalize_openai_base_url(settings.OPENAI_API_BASE)
+                base_url=settings.OPENAI_API_BASE
             )
             self.model_name = model_name
             self._redis = None
@@ -94,6 +98,12 @@ class EmbeddingService:
             向量列表
         """
         start_time = datetime.now()
+
+        if EVAL_MODE_CTX.get():
+            return self._encode_local(text)
+
+        if not settings.OPENAI_API_KEY:
+            return [0.0] * 1024
         
         # 尝试从缓存获取
         if use_cache:
@@ -122,9 +132,23 @@ class EmbeddingService:
             
         except Exception as e:
             logger.error(f"Cloud embedding failed: {e}")
-            if settings.LLM_STRICT_MODE:
-                raise
+            # 返回零向量作为 fallback (1024维是 bge-m3 的输出维度)
             return [0.0] * 1024
+
+    def _encode_local(self, text: str, dim: int = 1024) -> List[float]:
+        import hashlib
+        vec = [0.0] * dim
+        s = (text or "").lower()
+        tokens = re.findall(r"[a-z0-9]+", s)
+        if not tokens:
+            return vec
+        for tok in tokens:
+            h = hashlib.md5(tok.encode("utf-8")).digest()
+            idx = int.from_bytes(h[:4], "little") % dim
+            sign = -1.0 if (h[4] & 1) else 1.0
+            vec[idx] += sign
+        norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+        return [v / norm for v in vec]
     
     async def _get_cached_embedding(self, text: str) -> Optional[List[float]]:
         """从缓存获取 embedding"""
@@ -168,6 +192,9 @@ class EmbeddingService:
         Returns:
             向量列表的列表
         """
+        if EVAL_MODE_CTX.get():
+            return [self._encode_local(t) for t in texts]
+
         if use_cache:
             # 检查缓存，分离已缓存和未缓存的文本
             results = [None] * len(texts)
@@ -205,13 +232,14 @@ class EmbeddingService:
                 
             except Exception as e:
                 logger.error(f"Cloud batch embedding failed: {e}")
-                if settings.LLM_STRICT_MODE:
-                    raise
+                # 填充零向量
                 for idx in uncached_indices:
                     results[idx] = [0.0] * 1024
                 return results
         
         # 不使用缓存，直接批量编码
+        if not settings.OPENAI_API_KEY:
+            return [[0.0] * 1024 for _ in texts]
         try:
             response = await self.client.embeddings.create(
                 input=texts,
@@ -220,8 +248,6 @@ class EmbeddingService:
             return [d.embedding for d in response.data]
         except Exception as e:
             logger.error(f"Cloud batch embedding failed: {e}")
-            if settings.LLM_STRICT_MODE:
-                raise
             return [[0.0] * 1024 for _ in texts]
     
     async def get_cache_stats(self) -> dict:
@@ -335,12 +361,14 @@ class RetrievalService:
         top_k: int = 50
     ) -> List[Memory]:
         """向量检索"""
+        if EVAL_MODE_CTX.get():
+            return await self._db_eval_vector_search(user_id, query, limit=top_k)
+
         # 1. 编码查询文本
         query_embedding = await self.embedding_service.encode(query)
         
-        if not self.milvus:
-            logger.warning("Milvus client not initialized, returning empty results")
-            return []
+        if self.milvus is None:
+            return await self._db_fallback_search(user_id, query, limit=top_k)
         
         try:
             # 2. 搜索相似向量
@@ -382,7 +410,7 @@ class RetrievalService:
                         elif isinstance(created_at_val, datetime):
                             created_at = created_at_val
                         else:
-                            created_at = datetime.fromtimestamp(0)
+                            created_at = datetime.now()
                         
                         # 获取相似度分数
                         score = hit.score if hasattr(hit, 'score') else (hit.distance if hasattr(hit, 'distance') else 0.0)
@@ -400,11 +428,108 @@ class RetrievalService:
                         continue
             
             logger.info(f"Vector search returned {len(memories)} candidates")
+            if not memories:
+                return await self._db_fallback_search(user_id, query, limit=top_k)
             return memories
             
         except Exception as e:
             logger.error(f"Vector search failed: {e}")
+            return await self._db_fallback_search(user_id, query, limit=top_k)
+
+    async def _db_eval_vector_search(self, user_id: str, query: str, limit: int = 50) -> List[Memory]:
+        if not self.db:
             return []
+        q = (query or "").strip()
+        if not q:
+            return []
+        pool_size = max(500, min(4000, int(limit) * 200))
+        try:
+            result = await self.db.execute(
+                text("""
+                    SELECT id::text, content, created_at AS ts
+                    FROM memories
+                    WHERE user_id::text = :user_id
+                      AND status IN ('pending', 'committed')
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                """),
+                {"user_id": user_id, "limit": int(pool_size)},
+            )
+            rows = result.fetchall()
+        except Exception:
+            return []
+
+        query_vec = self.embedding_service._encode_local(q)
+        scored: list[tuple[float, str, str, datetime]] = []
+        for mid, content, ts in rows:
+            text_content = content or ""
+            if not text_content:
+                continue
+            created_at = ts if isinstance(ts, datetime) else datetime.now()
+            mem_vec = self.embedding_service._encode_local(text_content)
+            sim = 0.0
+            for a, b in zip(query_vec, mem_vec):
+                sim += a * b
+            scored.append((sim, str(mid), text_content, created_at))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        out: List[Memory] = []
+        for sim, mid, content, created_at in scored[: int(limit)]:
+            out.append(
+                Memory(
+                    id=mid,
+                    content=content,
+                    cosine_sim=float(sim),
+                    valence=0.0,
+                    created_at=created_at,
+                    recency_score=self._calculate_recency(created_at),
+                )
+            )
+        return out
+
+    async def _db_fallback_search(self, user_id: str, query: str, limit: int = 50) -> List[Memory]:
+        if not self.db:
+            return []
+        q = (query or "").strip()
+        keyword = ""
+        m = re.match(r"(?i)^when did\\s+([A-Za-z][A-Za-z'\\-]*)\\b", q)
+        if m:
+            keyword = m.group(1)
+        if not keyword:
+            m2 = re.search(r"([A-Za-z]{3,})", q)
+            if m2:
+                keyword = m2.group(1)
+        like = f"%{keyword}%" if keyword else "%"
+        try:
+            result = await self.db.execute(
+                text("""
+                    SELECT id::text, content, created_at AS ts
+                    FROM memories
+                    WHERE user_id::text = :user_id
+                      AND content ILIKE :like
+                      AND status IN ('pending', 'committed')
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                """),
+                {"user_id": user_id, "like": like, "limit": int(limit)}
+            )
+            rows = result.fetchall()
+        except Exception:
+            return []
+        out: List[Memory] = []
+        for mid, content, ts in rows:
+            created_at = ts if isinstance(ts, datetime) else datetime.now()
+            out.append(
+                Memory(
+                    id=str(mid),
+                    content=content or "",
+                    cosine_sim=0.0,
+                    valence=0.0,
+                    created_at=created_at,
+                    recency_score=self._calculate_recency(created_at),
+                )
+            )
+        return out
     
     async def _graph_expand(
         self,

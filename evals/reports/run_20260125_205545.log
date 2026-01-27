@@ -1,0 +1,7 @@
+backend_base_url=http://localhost:8010
+enable_judge=False
+judge_model=gpt-4o-mini
+openai_base_url=https://api.openai.com/v1
+run_ltm=False
+[affinity_short_term_recall] str_1 skipped setup_failed=TimeoutError
+[affinity_short_term_recall] str_2 score=0 expected=上海徐汇区 output=我不记得你告诉过我你住在哪里了，你可以和我说说你住的地方吗？

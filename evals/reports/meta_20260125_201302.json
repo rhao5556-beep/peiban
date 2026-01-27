@@ -1,0 +1,1 @@
+﻿{"AFFINITY_EVAL_BASELINE_STYLE":"cs","AFFINITY_EVAL_ENABLE_JUDGE":"1","AFFINITY_EVAL_MODEL_BASELINE":"1","run_log":"C:\\Users\\murphy\\Desktop\\陪伴项目\\evals\\\\reports\\run_20260125_201302.log","failures":{"affinity_human_likeness_pairwise":1,"affinity_stance_independence":1},"OPENAI_API_BASE":"https://api.openai.com","AFFINITY_EVAL_RUN_LTM":"1"}

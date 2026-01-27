@@ -1,0 +1,12 @@
+backend_base_url=http://localhost:8010
+enable_judge=True
+judge_model=deepseek-ai/DeepSeek-V3
+baseline_model=deepseek-ai/DeepSeek-V3
+openai_base_url=https://api.siliconflow.cn/v1
+run_ltm=True
+enable_baseline=True
+backend_timeout_s=60.0
+openai_timeout_s=60.0
+[affinity_short_term_recall] str_1 score=0 expected=小明 output=你的名字是小明。如果有其他问题或者想要分享什么，都可以告诉我哦。
+[affinity_short_term_recall] str_2 score=0 expected=上海徐汇区 output=你住在上海的徐汇区。[1]
+[affinity_short_term_recall] str_3 score=0 expected=团子 output=你养的宠物叫团子。

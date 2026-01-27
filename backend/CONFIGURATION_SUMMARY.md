@@ -11,7 +11,7 @@
 **状态**: ✅ 已正确配置
 
 ```env
-OPENAI_API_KEY=sk-your-siliconflow-api-key
+OPENAI_API_KEY=sk-xyuqotucvlvthyssvbnkqxtwhbylgummomshkqvfecaueghcx
 OPENAI_API_BASE=https://api.siliconflow.cn/v1
 OPENAI_MODEL=deepseek-ai/DeepSeek-V3
 ```
@@ -27,7 +27,7 @@ OPENAI_MODEL=deepseek-ai/DeepSeek-V3
 **状态**: ✅ 已更新为强随机字符串
 
 ```env
-JWT_SECRET=your-strong-random-jwt-secret
+JWT_SECRET=nlNLbV62eKjedCT3tOacNEVE13cBRC25I61KtQcTMiw
 ```
 
 - ❌ **不需要花钱** - 这是自己生成的随机字符串

@@ -1,0 +1,3 @@
+{"eval": "affinity_human_likeness_pairwise", "case_id": "hl_1", "input": "我今天有点累。", "output": "", "expected": "A", "score": 0, "rationale": "", "backend_base_url": "http://localhost:8010", "user_id": "b4e0e7d0-ad70-4a46-a19c-06a05fe9c3ce", "session_setup": "f411d1a9-591b-48c3-95c9-85b087bcbb79", "session_query": "f411d1a9-591b-48c3-95c9-85b087bcbb79", "error": "TimeoutError: "}
+{"eval": "affinity_human_likeness_pairwise", "case_id": "hl_2", "skipped": true, "reason": "setup_failed: TimeoutError: "}
+{"eval": "affinity_human_likeness_pairwise", "case_id": "hl_3", "skipped": true, "reason": "setup_failed: TimeoutError: "}

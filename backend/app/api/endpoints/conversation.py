@@ -1,5 +1,5 @@
 """对话端点"""
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
@@ -28,7 +28,8 @@ class MessageRequest(BaseModel):
     idempotency_key: Optional[str] = None
     mode: Literal["graph_only", "hybrid"] = "hybrid"  # 对话模式
     eval_mode: bool = False
-    eval_mode: bool = False  # 评测模式：更结构化的回答与上下文呈现（默认关闭）
+    eval_task_type: Optional[str] = None
+    eval_evidence_ids: Optional[List[int]] = None
 
 
 class MessageResponse(BaseModel):
@@ -81,12 +82,17 @@ async def send_message(
 
         # 初始化服务
         neo4j_driver = get_neo4j_driver()
-        milvus_collection = get_milvus_collection()
+        milvus_collection = None
+        try:
+            milvus_collection = get_milvus_collection()
+        except Exception:
+            milvus_collection = None
         
         graph_service = GraphService(neo4j_driver=neo4j_driver)
         retrieval_service = RetrievalService(
             milvus_client=milvus_collection,
-            graph_service=graph_service
+            graph_service=graph_service,
+            db_session=db
         )
         affinity_service = AffinityService()
         
@@ -102,7 +108,9 @@ async def send_message(
             message=request.message,
             session_id=session_id,
             mode=request.mode,  # graph_only 或 hybrid
-            eval_mode=request.eval_mode
+            eval_mode=bool(request.eval_mode),
+            eval_task_type=request.eval_task_type,
+            eval_evidence_ids=request.eval_evidence_ids
         )
         
         return MessageResponse(
@@ -131,7 +139,9 @@ async def send_message(
             memories_used=[],
             tone_type="friendly",
             response_time_ms=0,
-            memory_status="error"
+            memory_status="error",
+            mode=request.mode,
+            context_source={"error": str(e)}
         )
 
 

@@ -160,12 +160,21 @@ def _ask_backend(
     message: str,
     mode: str,
     eval_mode: bool,
+    eval_task_type: Optional[str],
+    evidence_ids: Optional[List[int]],
     session_id: Optional[str],
     request_timeout_s: float,
 ) -> Dict[str, Any]:
     url = f"{backend_base_url.rstrip('/')}/api/v1/conversation/message"
     headers = {"Authorization": f"Bearer {access_token}"}
-    payload: Dict[str, Any] = {"message": message, "mode": mode, "eval_mode": bool(eval_mode)}
+    payload: Dict[str, Any] = {
+        "message": message,
+        "mode": mode,
+        "eval_mode": bool(eval_mode),
+        "eval_task_type": eval_task_type,
+    }
+    if evidence_ids:
+        payload["eval_evidence_ids"] = evidence_ids
     if session_id:
         payload["session_id"] = session_id
 
@@ -315,6 +324,8 @@ def main() -> None:
                     message=injected_message,
                     mode=args.mode,
                     eval_mode=args.eval_mode,
+                    eval_task_type=task_type,
+                    evidence_ids=evidence_ids,
                     session_id=session_id,
                     request_timeout_s=args.request_timeout_s,
                 )

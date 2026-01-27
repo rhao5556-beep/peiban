@@ -1,4 +1,5 @@
 """认证端点"""
+import asyncio
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel
 import uuid
@@ -6,7 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token
-from app.core.database import get_db
+from app.core.database import AsyncSessionLocal
 from app.core.ids import normalize_uuid
 
 router = APIRouter()
@@ -25,7 +26,7 @@ class TokenResponse(BaseModel):
 
 
 @router.post("/token", response_model=TokenResponse)
-async def get_token(request: TokenRequest = None, db: AsyncSession = Depends(get_db)):
+async def get_token(request: TokenRequest = None):
     """
     获取访问 Token
     
@@ -37,19 +38,29 @@ async def get_token(request: TokenRequest = None, db: AsyncSession = Depends(get
     user_id = normalize_uuid(request.user_id) if request and request.user_id else str(uuid.uuid4())
     
     # 确保用户存在于 users 表中（upsert）
+    db_session = None
     try:
-        await db.execute(
-            text("""
-                INSERT INTO users (id, created_at)
-                VALUES (:user_id, NOW())
-                ON CONFLICT (id) DO NOTHING
-            """),
-            {"user_id": user_id}
-        )
-        await db.commit()
+        async with AsyncSessionLocal() as db:
+            db_session = db
+            await asyncio.wait_for(
+                db.execute(
+                    text("""
+                        INSERT INTO users (id, created_at)
+                        VALUES (:user_id, NOW())
+                        ON CONFLICT (id) DO NOTHING
+                    """),
+                    {"user_id": user_id}
+                ),
+                timeout=1.0
+            )
+            await db.commit()
     except Exception as e:
         # 如果插入失败，继续（用户可能已存在）
-        await db.rollback()
+        try:
+            if db_session:
+                await db_session.rollback()
+        except Exception:
+            pass
     
     token = create_access_token(data={"sub": user_id})
     

@@ -71,7 +71,8 @@ export function AffinityDashboard(props: {
       setMemories(mems);
       setSelectedIds({});
     } catch (e: any) {
-      setError(e?.message ?? '加载失败');
+      const msg = e?.message ?? '加载失败';
+      setError(msg.includes('Failed to fetch') ? '无法连接后端（网络/跨域/地址配置问题）。请确认后端已启动，或配置 VITE_API_BASE_URL。' : msg);
     } finally {
       setBusy(false);
     }

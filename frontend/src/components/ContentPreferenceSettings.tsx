@@ -27,7 +27,7 @@ const AVAILABLE_SOURCES = [
 
 export const ContentPreferenceSettings: React.FC = () => {
   const [preference, setPreference] = useState<ContentPreference>({
-    enabled: false,
+    enabled: true,
     daily_limit: 1,
     preferred_sources: [],
     quiet_hours_start: null,
@@ -100,50 +100,16 @@ export const ContentPreferenceSettings: React.FC = () => {
       <h2 className="text-xl font-semibold mb-4">推荐设置</h2>
       
       <div className="bg-white border border-gray-200 rounded-lg p-6 space-y-6">
-        
-        {/* 启用开关 */}
-        <div className="flex items-center justify-between p-4 bg-blue-50 border-2 border-blue-200 rounded-lg">
-          <div>
-            <h3 className="font-medium text-gray-900">启用内容推荐</h3>
-            <p className="text-sm text-gray-600 mt-1">
-              {preference.enabled 
-                ? '✓ 已启用 - 可以配置下方设置' 
-                : '⚠️ 请先打开此开关，然后才能配置其他设置'}
-            </p>
-          </div>
-          <button
-            onClick={() => setPreference(prev => ({ ...prev, enabled: !prev.enabled }))}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-              preference.enabled ? 'bg-blue-600' : 'bg-gray-200'
-            }`}
-          >
-            <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                preference.enabled ? 'translate-x-6' : 'translate-x-1'
-              }`}
-            />
-          </button>
-        </div>
-        
-        {/* 禁用提示 */}
-        {!preference.enabled && (
-          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-            <p className="text-yellow-800 text-sm">
-              👆 请先点击上方的"启用内容推荐"开关，将其打开（变成蓝色），然后下方的所有设置就可以修改了。
-            </p>
-          </div>
-        )}
 
         {/* 每日限额 */}
-        <div className={!preference.enabled ? 'opacity-50' : ''}>
+        <div>
           <label className="block font-medium text-gray-900 mb-2">
-            每日推荐数量 {!preference.enabled && <span className="text-xs text-gray-400">(需先启用推荐)</span>}
+            每日推荐数量
           </label>
           <select
             value={preference.daily_limit}
             onChange={(e) => setPreference(prev => ({ ...prev, daily_limit: parseInt(e.target.value) }))}
-            disabled={!preference.enabled}
-            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
+            className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             <option value={1}>1 条</option>
             <option value={2}>2 条</option>
@@ -156,24 +122,23 @@ export const ContentPreferenceSettings: React.FC = () => {
         </div>
 
         {/* 来源选择 */}
-        <div className={!preference.enabled ? 'opacity-50' : ''}>
+        <div>
           <label className="block font-medium text-gray-900 mb-2">
-            内容来源 {!preference.enabled && <span className="text-xs text-gray-400">(需先启用推荐)</span>}
+            内容来源
           </label>
           <div className="space-y-2">
             {AVAILABLE_SOURCES.map(source => (
               <label
                 key={source.id}
-                className={`flex items-center space-x-3 ${preference.enabled ? 'cursor-pointer' : 'cursor-not-allowed'}`}
+                className="flex items-center space-x-3 cursor-pointer"
               >
                 <input
                   type="checkbox"
                   checked={preference.preferred_sources.includes(source.id)}
                   onChange={() => toggleSource(source.id)}
-                  disabled={!preference.enabled}
-                  className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
                 />
-                <span className={preference.enabled ? 'text-gray-900' : 'text-gray-500'}>
+                <span className="text-gray-900">
                   {source.name}
                 </span>
               </label>
@@ -185,25 +150,23 @@ export const ContentPreferenceSettings: React.FC = () => {
         </div>
 
         {/* 免打扰时间 */}
-        <div className={!preference.enabled ? 'opacity-50' : ''}>
+        <div>
           <label className="block font-medium text-gray-900 mb-2">
-            免打扰时间 {!preference.enabled && <span className="text-xs text-gray-400">(需先启用推荐)</span>}
+            免打扰时间
           </label>
           <div className="flex items-center space-x-3">
             <input
               type="time"
               value={preference.quiet_hours_start || ''}
               onChange={(e) => setPreference(prev => ({ ...prev, quiet_hours_start: e.target.value || null }))}
-              disabled={!preference.enabled}
-              className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
+              className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             <span className="text-gray-500">至</span>
             <input
               type="time"
               value={preference.quiet_hours_end || ''}
               onChange={(e) => setPreference(prev => ({ ...prev, quiet_hours_end: e.target.value || null }))}
-              disabled={!preference.enabled}
-              className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed"
+              className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
           <p className="text-sm text-gray-500 mt-1">

@@ -1,5 +1,0 @@
-.env.local
-.env
-reports/
-reports_*/
-__pycache__/

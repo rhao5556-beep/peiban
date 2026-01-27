@@ -1,0 +1,3 @@
+{"eval": "affinity_short_term_recall", "case_id": "str_1", "skipped": true, "reason": "setup_failed: TimeoutError: "}
+{"eval": "affinity_short_term_recall", "case_id": "str_2", "skipped": true, "reason": "setup_failed: HTTPStatusError: Server error '500 Internal Server Error' for url 'http://localhost:8010/api/v1/conversation/message'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500"}
+{"eval": "affinity_short_term_recall", "case_id": "str_3", "skipped": true, "reason": "setup_failed: ConnectError: All connection attempts failed"}

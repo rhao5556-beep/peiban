@@ -1,19 +1,15 @@
-export const Sender = {
-  USER: 'user',
-  AI: 'ai',
-  SYSTEM: 'system'
-} as const;
+export enum Sender {
+  USER = 'user',
+  AI = 'ai',
+  SYSTEM = 'system'
+}
 
-export type Sender = (typeof Sender)[keyof typeof Sender];
-
-export const MemoryState = {
-  PENDING: 'pending',
-  COMMITTED: 'committed',
-  DELETED: 'deleted',
-  NONE: 'none'
-} as const;
-
-export type MemoryState = (typeof MemoryState)[keyof typeof MemoryState];
+export enum MemoryState {
+  PENDING = 'pending',     // 正在处理/短期记忆
+  COMMITTED = 'committed', // 已存入长期记忆/图谱
+  DELETED = 'deleted',     // 已遗忘/删除
+  NONE = 'none'
+}
 
 export interface Message {
   id: string;
@@ -27,8 +23,7 @@ export interface Message {
     memeId: string;
     usageId: string;
     description: string;
-    imageUrl?: string | null;
-    reacted?: 'liked' | 'ignored' | 'disliked' | null;
+    imageUrl?: string;
   };
 }
 
@@ -37,6 +32,7 @@ export interface GraphNode {
   label: string;
   type: 'concept' | 'entity' | 'event';
   weight?: number;
+  properties?: Record<string, unknown>;
 }
 
 export interface GraphEdge {
@@ -45,6 +41,7 @@ export interface GraphEdge {
   target: string;
   label: string;
   weight?: number;
+  properties?: Record<string, unknown>;
 }
 
 export interface GraphData {
@@ -67,7 +64,7 @@ export interface UserState {
 // --- New Types for Backend Integration ---
 
 export interface StreamEvent {
-  type: 'start' | 'text' | 'memory_pending' | 'memory_committed' | 'done' | 'error' | 'meme';
+  type: 'start' | 'text' | 'memory_pending' | 'meme' | 'done' | 'error';
   content?: string;
   session_id?: string;
   memory_id?: string;
@@ -77,27 +74,4 @@ export interface StreamEvent {
 export interface MemoryStatusResponse {
   id: string;
   status: 'pending' | 'committed' | 'deleted';
-}
-
-export interface ProactiveMessage {
-  id: string;
-  trigger_type: string;
-  content: string;
-  status: string;
-  created_at: string | null;
-  sent_at: string | null;
-  read_at: string | null;
-  metadata: any;
-}
-
-export interface ProactivePreferences {
-  proactive_enabled: boolean;
-  morning_greeting_enabled: boolean;
-  evening_greeting_enabled: boolean;
-  silence_reminder_enabled: boolean;
-  quiet_hours_start: string;
-  quiet_hours_end: string;
-  max_messages_per_day: number;
-  preferred_morning_time: string;
-  preferred_evening_time: string;
 }

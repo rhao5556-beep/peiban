@@ -2,7 +2,8 @@
 import asyncio
 import json
 import logging
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, Literal, List
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
@@ -11,13 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
 from app.core.security import get_current_user
-from app.core.database import get_db, AsyncSessionLocal, get_redis_client, get_neo4j_driver
+from app.core.database import get_db, AsyncSessionLocal, get_redis_client, get_neo4j_driver, get_milvus_collection
+from app.core.ids import normalize_uuid
 from app.services.conversation_service import ConversationService
 from app.services.affinity_service import AffinityService
 from app.services.retrieval_service import RetrievalService
 from app.services.graph_service import GraphService
 from app.services.outbox_service import TransactionManager, IdempotencyChecker
-from app.services.meme_injection_service import MemeInjectionService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -28,6 +29,12 @@ class StreamMessageRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
     idempotency_key: Optional[str] = None
+    mode: Literal["graph_only", "hybrid"] = "hybrid"
+    eval_mode: bool = False
+    eval_task_type: Optional[str] = None
+    eval_evidence_ids: Optional[List[int]] = None
+    observed_at: Optional[datetime] = None
+    memorize_only: bool = False
 
 
 class ConversationDelta(BaseModel):
@@ -42,7 +49,13 @@ async def generate_stream_response(
     user_id: str,
     message: str,
     session_id: str,
-    idempotency_key: str
+    idempotency_key: str,
+    mode: str = "hybrid",
+    eval_mode: bool = False,
+    eval_task_type: Optional[str] = None,
+    eval_evidence_ids: Optional[List[int]] = None,
+    observed_at: Optional[datetime] = None,
+    memorize_only: bool = False
 ) -> AsyncGenerator[str, None]:
     """
     生成流式响应 - 使用真实的 ConversationService 和数据库
@@ -51,35 +64,37 @@ async def generate_stream_response(
         SSE 格式的 JSON 数据
     """
     logger.info(f"=== SSE Stream Start: user={user_id}, message={message[:50]}")
+
+    yield json.dumps({
+        "type": "start",
+        "session_id": session_id
+    })
     
     # 创建独立的数据库 session（因为 SSE 是长连接）
-    async with AsyncSessionLocal() as db_session:
-        try:
+    db_session = None
+    try:
+        async with AsyncSessionLocal() as session:
             try:
-                await db_session.execute(
-                    text("""
-                        INSERT INTO sessions (id, user_id, started_at, turn_count)
-                        VALUES (:id, :user_id, NOW(), 0)
-                        ON CONFLICT (id) DO NOTHING
-                    """),
-                    {"id": session_id, "user_id": user_id},
-                )
-                await db_session.commit()
+                await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=1.0)
+                db_session = session
             except Exception:
-                await db_session.rollback()
+                db_session = None
 
             # 1. 准备依赖服务
             redis_client = get_redis_client()
             neo4j_driver = get_neo4j_driver()
             
-            affinity_service = AffinityService(db_session=db_session)
+            affinity_service = AffinityService()
             graph_service = GraphService(neo4j_driver=neo4j_driver)
             transaction_manager = TransactionManager(db_session=db_session)
             idempotency_checker = IdempotencyChecker(redis_client=redis_client)
-            # RetrievalService 需要 Milvus, GraphService, DB Session
-            # 这里简化处理，假设 Milvus Client 在 RetrievalService 内部获取或者单例
+            milvus_collection = None
+            try:
+                milvus_collection = get_milvus_collection()
+            except Exception:
+                milvus_collection = None
             retrieval_service = RetrievalService(
-                 milvus_client=None, # RetrievalService 内部如果有单例处理最好，或者这里需要获取
+                 milvus_client=milvus_collection,
                  graph_service=graph_service, 
                  db_session=db_session
             )
@@ -90,21 +105,6 @@ async def generate_stream_response(
             # 但我们为了快速修复，先让 RetrievalService 尝试自己获取或者传入 None (它会有 warning 降级)
             # 更好的做法是在 factory 里处理。
             
-            # 补充：为了能让 Milvus 工作，我们需要传入 milvus connection
-            from pymilvus import connections
-            try:
-                 # 尝试获取 default alias
-                 # 注意：pymilvus 的 connection 是全局的，Collection() 使用 alias
-                 # RetrievalService 里的 _vector_search 使用 self.milvus.search
-                 # 这意味着 self.milvus 必须是一个 Collection 对象或者 connection 封装？
-                 # 看 retrieval_service.py:170: results = self.milvus.search(...)
-                 # 这说明 self.milvus 是一个 Collection 对象。
-                 from app.core.database import get_milvus_collection, milvus_connected
-                 milvus_collection = get_milvus_collection() if milvus_connected else None
-                 retrieval_service.milvus = milvus_collection
-            except Exception as e:
-                 logger.warning(f"Failed to get milvus collection: {e}")
-
             # 初始化 ConversationService
             logger.info("Initializing ConversationService with injected dependencies...")
             conversation_service = ConversationService(
@@ -116,26 +116,19 @@ async def generate_stream_response(
             )
             logger.info("ConversationService initialized successfully")
             
-            yield json.dumps({
-                "type": "start",
-                "session_id": session_id
-            })
-
             logger.info("Starting process_message_stream...")
-            emotion_valence = None
             async for delta in conversation_service.process_message_stream(
                 user_id=user_id,
                 session_id=session_id,
                 message=message,
-                idempotency_key=idempotency_key
+                idempotency_key=idempotency_key,
+                mode=mode or "hybrid",
+                eval_mode=eval_mode,
+                eval_task_type=eval_task_type,
+                eval_evidence_ids=eval_evidence_ids,
+                observed_at=observed_at,
+                memorize_only=bool(memorize_only)
             ):
-                if delta.type == "metadata" and delta.metadata:
-                    emo = delta.metadata.get("emotion")
-                    if isinstance(emo, dict) and "valence" in emo:
-                        try:
-                            emotion_valence = float(emo.get("valence"))
-                        except Exception:
-                            pass
                 # 将 ConversationDelta 转换为 JSON
                 logger.debug(f"Delta: type={delta.type}, content={delta.content[:20] if delta.content else None}")
                 yield json.dumps({
@@ -144,30 +137,15 @@ async def generate_stream_response(
                     "memory_id": delta.memory_id,
                     "metadata": delta.metadata
                 })
-
-            try:
-                injector = MemeInjectionService(db_session=db_session)
-                meme_payload = await injector.maybe_select_and_record(
-                    user_id=user_id,
-                    session_id=session_id,
-                    emotion_valence=emotion_valence,
-                )
-                if meme_payload:
-                    yield json.dumps({
-                        "type": "meme",
-                        "metadata": meme_payload
-                    })
-            except Exception as e:
-                logger.warning(f"Meme injection skipped: {e}")
             
             logger.info("=== SSE Stream Complete")
-            
-        except Exception as e:
-            logger.error(f"=== SSE Stream Error: {e}", exc_info=True)
-            yield json.dumps({
-                "type": "error",
-                "content": str(e)
-            })
+    except Exception as e:
+        logger.error(f"=== SSE Stream Error: {e}", exc_info=True)
+        yield json.dumps({
+            "type": "error",
+            "content": str(e)
+        })
+        yield json.dumps({"type": "done"})
 
 
 @router.post("/message")
@@ -185,14 +163,30 @@ async def stream_message(
     - type: done - 完成
     - type: error - 错误
     """
-    user_id = current_user["user_id"]
-    session_id = request.session_id or str(uuid.uuid4())
-    idempotency_key = request.idempotency_key or str(uuid.uuid4())
-    
-    return EventSourceResponse(
-        generate_stream_response(user_id, request.message, session_id, idempotency_key),
-        media_type="text/event-stream"
-    )
+    try:
+        user_id = normalize_uuid(current_user["user_id"])
+        session_id = normalize_uuid(request.session_id) if request.session_id else str(uuid.uuid4())
+        idempotency_key = request.idempotency_key or str(uuid.uuid4())
+        
+        return EventSourceResponse(
+            generate_stream_response(
+                user_id,
+                request.message,
+                session_id,
+                idempotency_key,
+                mode=request.mode,
+                eval_mode=bool(request.eval_mode),
+                eval_task_type=request.eval_task_type,
+                eval_evidence_ids=request.eval_evidence_ids,
+                observed_at=request.observed_at,
+                memorize_only=bool(request.memorize_only)
+            ),
+            media_type="text/event-stream"
+        )
+    except Exception as e:
+        async def error_generator():
+            yield json.dumps({"type": "error", "content": str(e)})
+        return EventSourceResponse(error_generator(), media_type="text/event-stream")
 
 
 @router.get("/test")

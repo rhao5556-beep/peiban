@@ -1,0 +1,2 @@
+{"eval": "affinity_short_term_recall", "case_id": "str_1", "skipped": true, "reason": "setup_failed: TimeoutError: "}
+{"eval": "affinity_short_term_recall", "case_id": "str_2", "input": "我住在上海徐汇区。我今天心情很好。请你记住我住在哪里。\n我住在哪里？", "output": "我不记得你告诉过我你住在哪里了，你可以和我说说你住的地方吗？", "expected": "上海徐汇区", "score": 0, "rationale": "", "backend_base_url": "http://localhost:8010", "user_id": "5e18a1d4-f717-49b8-b9ce-e1f3f0ab9a65", "session_setup": "be4b4fe4-1b5d-4d43-b67d-8281a803d4e9", "session_query": "be4b4fe4-1b5d-4d43-b67d-8281a803d4e9"}

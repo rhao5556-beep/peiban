@@ -1,0 +1,1 @@
+{"AFFINITY_EVAL_ENABLE_JUDGE": "1", "AFFINITY_EVAL_ENABLE_BASELINE": "1", "AFFINITY_EVAL_RUN_LTM": "1", "OPENAI_API_BASE": "https://api.siliconflow.cn/v1", "AFFINITY_EVAL_JUDGE_MODEL": "deepseek-ai/DeepSeek-V3", "AFFINITY_EVAL_BASELINE_MODEL": "deepseek-ai/DeepSeek-V3", "backend_base_url": "http://localhost:8010", "run_log": "evals\\reports_smoke_judge2\\run_20260126_085815.log"}

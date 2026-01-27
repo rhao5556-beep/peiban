@@ -56,10 +56,7 @@ docker exec -it affinity-postgres psql -U affinity -d affinity -c "SELECT COUNT(
 docker exec -it affinity-postgres psql -U affinity -d affinity -c "SELECT user_id, old_score, new_score, created_at FROM affinity_history ORDER BY created_at DESC LIMIT 5;"
 
 # 手动插入好感度记录（将 USER_ID 替换为实际用户 ID）
-docker exec -it affinity-postgres psql -U affinity -d affinity << EOF
-INSERT INTO affinity_history (user_id, old_score, new_score, delta, trigger_event, signals)
-VALUES ('USER_ID', 0.3, 0.6, 0.3, 'manual_boost', '{"reason": "test"}');
-EOF
+docker exec -it affinity-postgres psql -U affinity -d affinity -c "INSERT INTO affinity_history (user_id, old_score, new_score, delta, trigger_event, signals) VALUES ('USER_ID', 0.3, 0.6, 0.3, 'manual_boost', '{\"reason\": \"test\"}');"
 ```
 
 ### 步骤 5: 启用推荐功能

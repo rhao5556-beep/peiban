@@ -82,20 +82,21 @@ class Content:
 
 # RSS 订阅源列表
 RSS_FEEDS = [
-    "https://hnrss.org/frontpage",
-    "https://hnrss.org/newest",
-    "https://xkcd.com/rss.xml",
-    "https://www.ruanyifeng.com/blog/atom.xml",
-    "https://www.python.org/blogs/rss/",
-    "https://planetpython.org/rss20.xml",
-    "https://www.nasa.gov/rss/dyn/breaking_news.rss",
-    "https://rsshub.app/36kr/news",
+    "http://www.xinhuanet.com/politics/news_politics.xml",
+    "http://www.xinhuanet.com/world/news_world.xml",
+    "http://www.xinhuanet.com/fortune/news_fortune.xml",
+    "https://www.thepaper.cn/rss.jsp",
+    "https://www.jiemian.com/rss/index.xml",
+    "https://36kr.com/feed",
+    "https://www.huxiu.com/rss/0.xml",
+    "https://www.caixin.com/rss/all.xml",
+    "https://sspai.com/feed",
     "https://rsshub.app/ithome/ranking",
     "https://rsshub.app/geekpark",
-    "https://rsshub.app/thepaper/featured",
-    "https://rsshub.app/github/trending/daily",
     "https://rsshub.app/v2ex/hot",
-    "https://rsshub.app/douban/movie/weekly",
+    "https://rsshub.app/zhihu/hotlist",
+    "https://rsshub.app/weibo/search/hot",
+    "https://rsshub.app/bilibili/ranking/0/3/1",
 ]
 
 # 今日热榜 API

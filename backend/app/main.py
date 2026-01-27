@@ -1,7 +1,9 @@
 """FastAPI 主应用入口"""
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.router import api_router
 from app.core.config import settings
@@ -13,7 +15,10 @@ from app.middleware.rate_limit import RateLimitMiddleware
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # Startup
-    await wait_for_postgres()  # 等待数据库就绪
+    try:
+        await wait_for_postgres(max_retries=3, delay=1.0)
+    except Exception:
+        pass
     await init_db()
     yield
     # Shutdown
@@ -40,10 +45,13 @@ app.add_middleware(
 )
 
 # Rate Limiting 中间件
-app.add_middleware(RateLimitMiddleware, requests_per_minute=100)
+app.add_middleware(RateLimitMiddleware, requests_per_minute=100000)
 
 # 注册路由
 app.include_router(api_router, prefix="/api/v1")
+
+static_dir = Path(__file__).resolve().parents[2] / "data" / "memes"
+app.mount("/static/memes", StaticFiles(directory=str(static_dir), check_dir=False), name="memes")
 
 
 @app.get("/health")

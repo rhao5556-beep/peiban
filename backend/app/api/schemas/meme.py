@@ -10,7 +10,7 @@ class MemeResponse(BaseModel):
     
     用于返回单个表情包的详细信息
     """
-    id: UUID
+    id: str
     image_url: Optional[str] = None  # MVP阶段纯文本表情包可为空
     text_description: str
     source_platform: str  # 'weibo', 'douyin', 'bilibili'
@@ -96,7 +96,7 @@ class MemeFeedbackRequest(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "usage_id": "789e0123-e89b-12d3-a456-426614174000",
+                "usage_id": "550e8400-e29b-41d4-a716-446655440000",
                 "reaction": "liked"
             }
         }

@@ -2,22 +2,21 @@
 import asyncio
 import openai
 from app.core.config import settings
-from app.core.llm import normalize_openai_base_url
 
 async def test_llm():
     client = openai.AsyncOpenAI(
         api_key=settings.OPENAI_API_KEY,
-        base_url=normalize_openai_base_url(settings.OPENAI_API_BASE)
+        base_url=settings.OPENAI_API_BASE
     )
     
-    print(f"API Key set: {bool(settings.OPENAI_API_KEY)}")
-    print(f"API Base: {normalize_openai_base_url(settings.OPENAI_API_BASE)}")
-    print(f"Model: {settings.OPENAI_MODEL or 'deepseek-ai/DeepSeek-V3'}")
+    print(f"API Key: {settings.OPENAI_API_KEY[:20]}...")
+    print(f"API Base: {settings.OPENAI_API_BASE}")
+    print(f"Model: deepseek-ai/DeepSeek-V3")
     print("\n开始测试流式调用...\n")
     
     try:
         response = await client.chat.completions.create(
-            model=(settings.OPENAI_MODEL or "deepseek-ai/DeepSeek-V3"),
+            model="deepseek-ai/DeepSeek-V3",
             messages=[
                 {"role": "user", "content": "你好，请用一句话介绍你自己"}
             ],

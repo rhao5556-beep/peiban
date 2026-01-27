@@ -10,7 +10,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from app.worker import celery_app
 from app.core.config import settings
@@ -23,10 +23,16 @@ def get_sync_db_session():
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     
-    sync_url = settings.DATABASE_URL  # 已经是同步 URL
-    engine = create_engine(sync_url, pool_pre_ping=True)
-    Session = sessionmaker(bind=engine)
-    return Session()
+    sync_url = settings.DATABASE_URL
+    global _sync_engine, _SyncSession
+    if _sync_engine is None:
+        _sync_engine = create_engine(sync_url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+        _SyncSession = sessionmaker(bind=_sync_engine)
+    return _SyncSession()
+
+
+_sync_engine = None
+_SyncSession = None
 
 
 def get_recent_entities(user_id: str, limit: int = 50) -> List[Dict]:
@@ -185,7 +191,7 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
             content=content,
             embedding=embedding,
             valence=payload.get("valence", 0),
-            created_at_ts=payload.get("created_at")
+            observed_at=payload.get("observed_at")
         )
         
         # 6. 写入 Neo4j（使用 IR Critic 校验后的结果）
@@ -601,7 +607,7 @@ def write_to_milvus_sync(
     content: str,
     embedding: List[float],
     valence: float,
-    created_at_ts: int | None = None
+    observed_at: Optional[str] = None
 ) -> str:
     """写入 Milvus 向量存储（同步版本）"""
     from pymilvus import connections, Collection, utility
@@ -631,13 +637,22 @@ def write_to_milvus_sync(
             else:
                 embedding = embedding[:1024]
         
+        ts = None
+        if observed_at:
+            try:
+                ts = datetime.fromisoformat(str(observed_at))
+            except Exception:
+                ts = None
+        if ts is None:
+            ts = datetime.now()
+        
         data = [{
             "id": memory_id,
             "user_id": user_id,
             "content": content[:4096] if content else "",
             "embedding": embedding,
             "valence": float(valence) if valence else 0.0,
-            "created_at": int(created_at_ts) if isinstance(created_at_ts, int) else int(datetime.now().timestamp()),
+            "created_at": int(ts.timestamp()),
         }]
         
         result = collection.insert(data)
