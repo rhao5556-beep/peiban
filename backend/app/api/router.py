@@ -26,6 +26,9 @@ api_router.include_router(graph.router, prefix="/graph", tags=["图谱"])
 # SSE 流式路由
 api_router.include_router(sse.router, prefix="/sse", tags=["流式"])
 
+# 评测辅助路由
+api_router.include_router(evals.router, prefix="/evals", tags=["评测"])
+
 # 用户画像路由
 api_router.include_router(profile.router, prefix="/users", tags=["用户画像"])
 
@@ -40,6 +43,3 @@ api_router.include_router(proactive.router, prefix="/proactive", tags=["主动�
 
 # 监控路由（无需认证）
 api_router.include_router(metrics.router, tags=["监控"])
-
-# 评测辅助路由
-api_router.include_router(evals.router, prefix="/evals", tags=["评测"])

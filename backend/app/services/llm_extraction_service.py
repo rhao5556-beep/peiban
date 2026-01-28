@@ -15,11 +15,10 @@ LLM 实体抽取服务 - 图谱决策器
 import os
 import json
 import logging
-import time
-import random
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, asdict
+import re
 
 from openai import OpenAI
 
@@ -32,18 +31,18 @@ client = OpenAI(
     api_key=settings.OPENAI_API_KEY,
     base_url=settings.OPENAI_API_BASE
 )
-MODEL = settings.OPENAI_MODEL or "deepseek-ai/DeepSeek-V3"
+MODEL = settings.OPENAI_MODEL or "Pro/deepseek-ai/DeepSeek-V3.2"
 
 
 SYSTEM_PROMPT = """你是 Affinity 系统的记忆架构师（Graph Decisioner）。你的任务是：
 
-1) 从给定的消息（可能是中文或英文）中提取实体（Person, Location, Organization, Event, Preference, Other）
+1) 从给定的中文消息中提取实体（Person, Location, Organization, Event, Preference, Other）
    和实体间的关系。
 
 2) 执行实体归一化：
    - 如果识别到的实体与 context_entities 中名称相同或语义相近，必须复用其 id
    - 不得创建重复实体
-   - 若无法归一化，基于名称生成稳定 id（小写 + 将空格/标点转为下划线；中英文均可）
+   - 若无法归一化，基于中文名生成稳定 id（小写拼音/下划线）
 
 3) 提取实体间关系（Entity→Entity），不仅仅是用户与实体的关系
    - 例如："二丫喜欢足球" → 二丫 -[LIKES]-> 足球
@@ -85,7 +84,7 @@ SYSTEM_PROMPT = """你是 Affinity 系统的记忆架构师（Graph Decisioner�
       "source": "entity_id_or_user",
       "target": "entity_id",
       "type": "从上面支持的关系类型中选择",
-      "desc": "关系描述（尽量用中文；如原文为英文可保留英文关键词；若包含时间/日期/持续时长，请把它写进 desc）",
+      "desc": "关系描述（中文）",
       "weight": 0.8,
       "confidence": 0.9
     }
@@ -108,10 +107,8 @@ SYSTEM_PROMPT = """你是 Affinity 系统的记忆架构师（Graph Decisioner�
 - 提问句：询问信息，**不能从提问部分创建关系**
   - 包含以下特征的是提问句：
     - 以"？"结尾
-    - 以"?"结尾
     - 包含"吗"、"呢"、"是否"、"是不是"
     - 包含"谁"、"什么"、"哪里"、"怎么"、"为什么"、"多少"
-    - 英文疑问词：who/what/when/where/why/how
     - 包含"认识...吗"、"知道...吗"、"记得...吗"
   - 例如："我认识老师吗？" → 返回空（纯提问）
   - 例如："二丫喜欢什么？" → 返回空（纯提问）
@@ -152,8 +149,9 @@ def extract_ir(
     text: str,
     user_id: str,
     context_entities: List[Dict[str, Any]],
-    max_retries: Optional[int] = None,
-    timeout: Optional[float] = None
+    max_retries: int = 2,
+    timeout: int = 30,
+    model: Optional[str] = None
 ) -> ExtractionResult:
     """
     调用 LLM 提取实体和关系
@@ -184,18 +182,13 @@ user_id: {user_id}
 
 请严格按 JSON Schema 输出，提取所有实体和关系（包括实体间关系）。"""
 
-    if max_retries is None:
-        max_retries = int(settings.ENTITY_EXTRACTION_MAX_RETRIES)
-    if timeout is None:
-        timeout = float(settings.ENTITY_EXTRACTION_TIMEOUT_S)
-
     last_error = None
     raw_response = None
     
     for attempt in range(max_retries + 1):
         try:
             response = client.chat.completions.create(
-                model=MODEL,
+                model=(model or MODEL),
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt}
@@ -228,7 +221,7 @@ user_id: {user_id}
             
             # 补充 metadata
             metadata["source"] = "llm"
-            metadata["model_version"] = MODEL
+            metadata["model_version"] = (model or MODEL)
             metadata["timestamp"] = datetime.utcnow().isoformat()
             if "overall_confidence" not in metadata:
                 metadata["overall_confidence"] = 0.8
@@ -267,49 +260,18 @@ user_id: {user_id}
         except Exception as e:
             last_error = f"API error: {e}"
             logger.warning(f"LLM extraction attempt {attempt + 1} failed: {last_error}")
+        
+        # 重试前等待
+        if attempt < max_retries:
+            import time
+            time.sleep(1 + attempt * 2)
+    
+    # 所有重试都失败
+    logger.error(f"LLM extraction failed after {max_retries + 1} attempts: {last_error}")
 
-        if last_error:
-            low = last_error.lower()
-            if any(x in low for x in ["401", "unauthorized", "invalid api key", "api key"]):
-                break
-            if attempt < max_retries:
-                base = float(settings.ENTITY_EXTRACTION_RETRY_BACKOFF_S)
-                sleep_s = min(5.0, base * (2 ** attempt) + random.random() * 0.2)
-                time.sleep(sleep_s)
-            continue
-
-    if settings.ENTITY_EXTRACTION_FALLBACK_ENABLED:
-        try:
-            from app.services.rule_extraction_service import extract_ir_rule
-
-            entities, relations, conf = extract_ir_rule(text)
-            metadata = {
-                "source": "rule",
-                "model_version": "rule_fallback",
-                "timestamp": datetime.utcnow().isoformat(),
-                "overall_confidence": conf,
-            }
-            user_exists = any(e.get("id") == "user" or e.get("is_user") for e in entities)
-            if not user_exists:
-                entities.insert(
-                    0,
-                    {
-                        "id": "user",
-                        "name": "我",
-                        "type": "Person",
-                        "is_user": True,
-                        "confidence": 1.0,
-                    },
-                )
-            return ExtractionResult(
-                success=True,
-                entities=entities,
-                relations=relations,
-                metadata=metadata,
-                raw_response=None,
-            )
-        except Exception as e:
-            last_error = f"{last_error}; fallback_error: {e}"
+    fallback = _regex_fallback_ir(text=text, user_id=user_id, context_entities=context_entities)
+    if fallback.success:
+        return fallback
 
     return ExtractionResult(
         success=False,
@@ -320,9 +282,10 @@ user_id: {user_id}
             "model_version": MODEL,
             "timestamp": datetime.utcnow().isoformat(),
             "overall_confidence": 0.0,
+            "error": last_error
         },
         raw_response=raw_response,
-        error=last_error,
+        error=last_error
     )
 
 
@@ -354,3 +317,93 @@ def _slugify(name: str) -> str:
     s = re.sub(r'[^a-z0-9_]', '_', s)
     s = re.sub(r'_+', '_', s)
     return s.strip('_') or "unknown"
+
+
+def _regex_fallback_ir(text: str, user_id: str, context_entities: List[Dict[str, Any]]) -> ExtractionResult:
+    def norm_name(v: str) -> str:
+        return re.sub(r"\s+", "", (v or "").strip()).lower()
+
+    context_by_name = {}
+    for e in context_entities or []:
+        n = norm_name(e.get("name", ""))
+        if n:
+            context_by_name[n] = e
+
+    def is_question_clause(clause: str) -> bool:
+        c = clause.strip()
+        if not c:
+            return True
+        if c.endswith(("?", "？")):
+            return True
+        return any(x in c for x in ["吗", "呢", "是否", "是不是", "谁", "什么", "哪里", "怎么", "为什么", "多少"])
+
+    clauses = [c.strip() for c in re.split(r"[。\n；;]+", text or "") if c.strip()]
+
+    entities: List[Dict[str, Any]] = [{
+        "id": "user",
+        "name": "我",
+        "type": "Person",
+        "is_user": True,
+        "confidence": 1.0
+    }]
+    relations: List[Dict[str, Any]] = []
+
+    def upsert_entity(name: str, ent_type: str) -> str:
+        key = norm_name(name)
+        if key in context_by_name and context_by_name[key].get("id"):
+            return context_by_name[key]["id"]
+        ent_id = _slugify(name)
+        if not any(e.get("id") == ent_id for e in entities):
+            entities.append({
+                "id": ent_id,
+                "name": name,
+                "type": ent_type,
+                "is_user": False,
+                "confidence": 0.55
+            })
+        return ent_id
+
+    patterns = [
+        (r"(我|本人|自己)?\s*(不喜欢|讨厌|恨|不想要|不需要)\s*(?P<obj>[^，。！？!?;；,]{1,20})", "DISLIKES", "Preference"),
+        (r"(我|本人|自己)?\s*(喜欢|爱|想要|需要)\s*(?P<obj>[^，。！？!?;；,]{1,20})", "LIKES", "Preference"),
+        (r"(我|本人|自己)?\s*(来自)\s*(?P<obj>[^，。！？!?;；,]{1,20})", "FROM", "Location"),
+        (r"(我|本人|自己)?\s*(住在|生活在)\s*(?P<obj>[^，。！？!?;；,]{1,20})", "LIVES_IN", "Location"),
+    ]
+
+    for clause in clauses:
+        if is_question_clause(clause):
+            continue
+        for pat, rel_type, ent_type in patterns:
+            m = re.search(pat, clause)
+            if not m:
+                continue
+            obj = (m.group("obj") or "").strip()
+            obj = re.sub(r"^(吃|喝|玩|看|听|做|去|学|练|跑|打|写)\s*", "", obj)
+            obj = re.sub(r"[\"'“”‘’]+", "", obj)
+            obj = obj.strip()
+            if not obj:
+                continue
+            target_id = upsert_entity(obj, ent_type)
+            relations.append({
+                "source": "user",
+                "target": target_id,
+                "type": rel_type,
+                "desc": clause,
+                "weight": 0.6,
+                "confidence": 0.55
+            })
+
+    has_payload = len(relations) > 0 or len(entities) > 1
+    return ExtractionResult(
+        success=has_payload,
+        entities=entities if has_payload else [],
+        relations=relations if has_payload else [],
+        metadata={
+            "source": "regex_fallback",
+            "model_version": "regex_v1",
+            "timestamp": datetime.utcnow().isoformat(),
+            "overall_confidence": 0.55 if has_payload else 0.0,
+        },
+        raw_response=None,
+        error=None if has_payload else "regex_fallback_no_signal"
+    )

@@ -54,7 +54,7 @@
 ```env
 OPENAI_API_KEY=your-siliconflow-api-key  # 必需
 OPENAI_API_BASE=https://api.siliconflow.cn/v1
-OPENAI_MODEL=deepseek-ai/DeepSeek-V3
+OPENAI_MODEL=Pro/deepseek-ai/DeepSeek-V3.2
 ```
 
 **验证方法**:

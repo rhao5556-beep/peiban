@@ -43,10 +43,10 @@ echo 并发: %CONCURRENCY%
 
 if "%1"=="quick" (
     echo 类型: 快速测试（每个任务 3 题）
-    python evals/run_knowmebench_dataset1_pipeline.py --backend_base_url %BACKEND_URL% --mode %MODE% --eval_mode --limit_per_task 3 --concurrency %CONCURRENCY%
+    python affinity_evals/knowmebench/run_dataset1_pipeline.py --backend_base_url %BACKEND_URL% --mode %MODE% --eval_mode --limit_per_task 3 --concurrency %CONCURRENCY%
 ) else if "%1"=="full" (
     echo 类型: 完整评测（所有题目）
-    python evals/run_knowmebench_dataset1_pipeline.py --backend_base_url %BACKEND_URL% --mode %MODE% --eval_mode --concurrency %CONCURRENCY%
+    python affinity_evals/knowmebench/run_dataset1_pipeline.py --backend_base_url %BACKEND_URL% --mode %MODE% --eval_mode --concurrency %CONCURRENCY%
 ) else (
     echo [错误] 未知参数: %1
     exit /b 1
@@ -88,7 +88,7 @@ echo [✓] 找到最新结果: %LATEST_DIR%
 
 echo.
 echo [3/3] 运行 Judge 评分...
-python evals/run_knowmebench_official_judge.py --input_dir %LATEST_DIR% --output_file %LATEST_DIR%\judge_results.json --judge_model Pro/deepseek-ai/DeepSeek-V3.2 --concurrency 4
+python affinity_evals/knowmebench/official_judge.py --input_dir %LATEST_DIR% --output_file %LATEST_DIR%\judge_results.json --concurrency 4
 
 if errorlevel 1 (
     echo [错误] Judge 评分失败！

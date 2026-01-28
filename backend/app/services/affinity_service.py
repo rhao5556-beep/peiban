@@ -9,6 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
+def cap_affinity_signals(signals: "AffinitySignals", recent_updates: int) -> "AffinitySignals":
+    if recent_updates <= 20:
+        return signals
+    return AffinitySignals(
+        user_initiated=False,
+        emotion_valence=signals.emotion_valence,
+        memory_confirmation=signals.memory_confirmation,
+        correction=signals.correction,
+        silence_days=signals.silence_days,
+    )
+
 
 @dataclass
 class AffinitySignals:
@@ -136,6 +147,27 @@ class AffinityService:
         Returns:
             AffinityResult: 新分数、状态和变化记录
         """
+        if self.db:
+            try:
+                await self.db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": user_id})
+            except Exception:
+                pass
+
+            try:
+                recent_count_result = await self.db.execute(
+                    text("""
+                        SELECT COUNT(*)
+                        FROM affinity_history
+                        WHERE user_id = :user_id
+                          AND created_at > NOW() - INTERVAL '1 minute'
+                    """),
+                    {"user_id": user_id}
+                )
+                recent_count = int(recent_count_result.scalar() or 0)
+                signals = cap_affinity_signals(signals, recent_count)
+            except Exception:
+                pass
+
         # 获取当前分数（已归一化为 0~1）
         current_01 = await self._get_current_affinity(user_id)
         old_score_01 = current_01 if current_01 is not None else 0.5
@@ -307,7 +339,9 @@ class AffinityService:
     async def get_affinity_history(
         self,
         user_id: str,
-        days: int = 30
+        days: int = 30,
+        limit: int = 200,
+        offset: int = 0
     ) -> List[AffinityResult]:
         """
         获取好感度变化历史（所有分数归一化为 0~1）
@@ -327,8 +361,10 @@ class AffinityService:
                     WHERE user_id = :user_id 
                       AND created_at > NOW() - INTERVAL '{days} days'
                     ORDER BY created_at DESC
+                    LIMIT :limit
+                    OFFSET :offset
                 """),
-                {"user_id": user_id}
+                {"user_id": user_id, "limit": limit, "offset": offset}
             )
             
             history = []

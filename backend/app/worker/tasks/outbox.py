@@ -11,16 +11,36 @@ import logging
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List
-import re
-import calendar
 
 from app.worker import celery_app
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_SYNC_ENGINE = None
-_SYNC_SESSIONMAKER = None
+_sync_neo4j_driver = None
+
+
+def get_sync_neo4j_driver():
+    global _sync_neo4j_driver
+    if _sync_neo4j_driver is not None:
+        return _sync_neo4j_driver
+    from neo4j import GraphDatabase
+    _sync_neo4j_driver = GraphDatabase.driver(
+        settings.NEO4J_URI,
+        auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
+        max_connection_pool_size=50,
+    )
+    return _sync_neo4j_driver
+
+
+def close_sync_neo4j_driver():
+    global _sync_neo4j_driver
+    if _sync_neo4j_driver is not None:
+        try:
+            _sync_neo4j_driver.close()
+        except Exception:
+            pass
+        _sync_neo4j_driver = None
 
 
 def get_sync_db_session():
@@ -28,17 +48,10 @@ def get_sync_db_session():
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     
-    global _SYNC_ENGINE, _SYNC_SESSIONMAKER
-    if _SYNC_ENGINE is None or _SYNC_SESSIONMAKER is None:
-        sync_url = settings.DATABASE_URL
-        _SYNC_ENGINE = create_engine(
-            sync_url,
-            pool_pre_ping=True,
-            pool_size=1,
-            max_overflow=2,
-        )
-        _SYNC_SESSIONMAKER = sessionmaker(bind=_SYNC_ENGINE)
-    return _SYNC_SESSIONMAKER()
+    sync_url = settings.DATABASE_URL  # 已经是同步 URL
+    engine = create_engine(sync_url, pool_pre_ping=True)
+    Session = sessionmaker(bind=engine)
+    return Session()
 
 
 def get_recent_entities(user_id: str, limit: int = 50) -> List[Dict]:
@@ -46,13 +59,8 @@ def get_recent_entities(user_id: str, limit: int = 50) -> List[Dict]:
     
     注意：实体节点使用动态标签（Person, Location 等），不是 Entity
     """
-    from neo4j import GraphDatabase
-    
     try:
-        driver = GraphDatabase.driver(
-            settings.NEO4J_URI,
-            auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
-        )
+        driver = get_sync_neo4j_driver()
         
         with driver.session() as session:
             # 查询所有带 user_id 的节点（排除 User 节点）
@@ -69,165 +77,12 @@ def get_recent_entities(user_id: str, limit: int = 50) -> List[Dict]:
             )
             entities = [{"id": r["id"], "name": r["name"], "type": r["type"]} for r in result]
         
-        driver.close()
         logger.info(f"Got {len(entities)} recent entities for user {user_id[:8]}")
         return entities
         
     except Exception as e:
         logger.warning(f"Failed to get recent entities: {e}")
         return []
-
-
-def _extract_event_time_from_content(content: str) -> tuple[str, int] | tuple[None, None]:
-    t = (content or "").strip()
-    if not t:
-        return None, None
-    matches = re.findall(r"\bts=([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})\b", t)
-    if not matches:
-        matches = re.findall(r"\bts=([0-9]{4}-[0-9]{2}-[0-9]{2})\b", t)
-    if not matches:
-        return None, None
-    time_iso = matches[-1]
-    try:
-        dt = datetime.fromisoformat(time_iso)
-        epoch_ms = int(dt.timestamp() * 1000)
-        return time_iso, epoch_ms
-    except Exception:
-        return time_iso, None
-
-
-def _normalize_relative_time(base_iso: str, context_text: str) -> tuple[str, int] | tuple[str, None] | tuple[None, None]:
-    if not base_iso:
-        return None, None
-    try:
-        dt = datetime.fromisoformat(base_iso)
-    except Exception:
-        return base_iso, None
-    low = (context_text or "").lower()
-
-    def shift_months(months: int) -> datetime:
-        y = dt.year
-        m = dt.month + months
-        while m <= 0:
-            m += 12
-            y -= 1
-        while m > 12:
-            m -= 12
-            y += 1
-        last_day = calendar.monthrange(y, m)[1]
-        return dt.replace(year=y, month=m, day=min(dt.day, last_day))
-
-    def previous_weekday(target_weekday: int) -> datetime:
-        from datetime import timedelta
-        days_back = (dt.weekday() - target_weekday) % 7
-        if days_back == 0:
-            days_back = 7
-        return dt - timedelta(days=days_back)
-
-    if "yesterday" in low or "昨天" in context_text:
-        from datetime import timedelta
-        dt = dt - timedelta(days=1)
-    elif "tomorrow" in low or "明天" in context_text:
-        from datetime import timedelta
-        dt = dt + timedelta(days=1)
-    elif "last week" in low or "上周" in context_text:
-        from datetime import timedelta
-        if "上上周" in context_text:
-            dt = dt - timedelta(days=14)
-        else:
-            dt = dt - timedelta(days=7)
-    elif "few weeks ago" in low or "前几周" in context_text or "几周前" in context_text:
-        from datetime import timedelta
-        dt = dt - timedelta(days=21)
-    else:
-        m = re.search(r"\b(\d+)\s+weeks?\s+ago\b", low)
-        if m:
-            from datetime import timedelta
-            dt = dt - timedelta(days=int(m.group(1)) * 7)
-
-    if "last friday" in low:
-        dt = previous_weekday(4)
-    elif "last monday" in low:
-        dt = previous_weekday(0)
-    elif "last tuesday" in low:
-        dt = previous_weekday(1)
-    elif "last wednesday" in low:
-        dt = previous_weekday(2)
-    elif "last thursday" in low:
-        dt = previous_weekday(3)
-    elif "last saturday" in low:
-        dt = previous_weekday(5)
-    elif "last sunday" in low:
-        dt = previous_weekday(6)
-    else:
-        m = re.search(r"上周([一二三四五六日天])", context_text)
-        if m:
-            mapping = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
-            wd = mapping.get(m.group(1))
-            if wd is not None:
-                from datetime import timedelta
-                monday = dt - timedelta(days=dt.weekday())
-                dt = monday - timedelta(days=7 - wd)
-
-    if "last month" in low or "上个月" in context_text:
-        dt = shift_months(-1)
-    elif "next month" in low or "下个月" in context_text:
-        dt = shift_months(1)
-
-    if "last year" in low or "去年" in context_text:
-        try:
-            dt = dt.replace(year=dt.year - 1)
-        except Exception:
-            pass
-    elif "next year" in low or "明年" in context_text:
-        try:
-            dt = dt.replace(year=dt.year + 1)
-        except Exception:
-            pass
-    norm_iso = dt.isoformat(timespec="seconds")
-    return norm_iso, int(dt.timestamp() * 1000)
-
-
-def _assign_relation_times(content: str, entities: List[Dict], relations: List[Dict]) -> tuple[str | None, int | None]:
-    entity_name_by_id = {str(e.get("id")): str(e.get("name") or "") for e in (entities or [])}
-    lines = []
-    for raw in (content or "").splitlines():
-        raw = raw.strip()
-        if not raw:
-            continue
-        m = re.search(r"\bts=([0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2})?)\b", raw)
-        ts = m.group(1) if m else ""
-        lines.append({"raw": raw, "low": raw.lower(), "ts": ts})
-
-    fallback_iso, fallback_ms = _extract_event_time_from_content(content)
-
-    for rel in relations or []:
-        src = str(rel.get("source") or "")
-        tgt = str(rel.get("target") or "")
-        src_name = entity_name_by_id.get(src, "")
-        tgt_name = entity_name_by_id.get(tgt, "")
-
-        candidates = []
-        for ln in lines:
-            score = 0
-            if src_name and src_name.lower() in ln["low"]:
-                score += 2
-            if tgt_name and tgt_name.lower() in ln["low"]:
-                score += 2
-            if score > 0 and ln["ts"]:
-                candidates.append((score, ln))
-        chosen = None
-        if candidates:
-            candidates.sort(key=lambda x: (x[0], x[1]["ts"]))
-            chosen = candidates[-1][1]
-        base_iso = (chosen["ts"] if chosen else fallback_iso) or ""
-        context_text = (chosen["raw"] if chosen else "") or (rel.get("desc") or "")
-        norm_iso, norm_ms = _normalize_relative_time(base_iso, context_text)
-        if norm_iso:
-            rel["time_iso"] = norm_iso
-            if norm_ms is not None:
-                rel["time_epoch_ms"] = norm_ms
-    return fallback_iso, fallback_ms
 
 
 @celery_app.task(bind=True, max_retries=settings.OUTBOX_MAX_RETRIES)
@@ -254,8 +109,9 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
         result = db.execute(
             text("""
                 UPDATE outbox_events 
-                SET status = 'processing'
-                WHERE event_id = :event_id AND status IN ('pending', 'processing')
+                SET status = 'processing',
+                    processing_started_at = COALESCE(processing_started_at, NOW())
+                WHERE event_id = :event_id AND status = 'pending'
                 RETURNING id
             """),
             {"event_id": event_id}
@@ -266,6 +122,17 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
             return {"status": "skipped", "reason": "already_processed"}
         
         db.commit()
+
+        state_row = db.execute(
+            text("""
+                SELECT milvus_written_at, neo4j_written_at
+                FROM outbox_events
+                WHERE event_id = :event_id
+            """),
+            {"event_id": event_id}
+        ).fetchone()
+        milvus_written_at = state_row[0] if state_row else None
+        neo4j_written_at = state_row[1] if state_row else None
         
         memory_id = payload.get("memory_id")
         user_id = payload.get("user_id")
@@ -276,62 +143,48 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
         context_entities = get_recent_entities(user_id)
         
         # 3. LLM 实体抽取
-        if settings.OUTBOX_INLINE_PROCESSING:
-            extraction_result = extract_ir(
-                text=content,
-                user_id=user_id,
-                context_entities=context_entities,
-                max_retries=int(settings.ENTITY_EXTRACTION_INLINE_MAX_RETRIES),
-                timeout=float(settings.ENTITY_EXTRACTION_INLINE_TIMEOUT_S),
-            )
-        else:
-            extraction_result = extract_ir(
-                text=content,
-                user_id=user_id,
-                context_entities=context_entities,
-                max_retries=int(settings.ENTITY_EXTRACTION_MAX_RETRIES),
-                timeout=float(settings.ENTITY_EXTRACTION_TIMEOUT_S),
-            )
+        extraction_result = extract_ir(
+            text=content,
+            user_id=user_id,
+            context_entities=context_entities
+        )
         
         # 4. 检查抽取结果
         if not extraction_result.success:
             # LLM 抽取失败，进入重试
             retry_count = self.request.retries
             
-            if settings.OUTBOX_INLINE_PROCESSING:
-                retry_count = settings.OUTBOX_MAX_RETRIES
-
-            if extraction_result.error:
-                low = extraction_result.error.lower()
-                if any(x in low for x in ["401", "unauthorized", "invalid api key", "api key"]):
-                    retry_count = settings.OUTBOX_MAX_RETRIES
-
             if retry_count < settings.OUTBOX_MAX_RETRIES:
                 countdown = settings.OUTBOX_BACKOFF_BASE ** retry_count
                 logger.warning(f"LLM extraction failed, retrying in {countdown}s (attempt {retry_count + 1})")
+                db.execute(
+                    text("""
+                        UPDATE outbox_events
+                        SET status = 'pending',
+                            retry_count = retry_count + 1,
+                            processing_started_at = NULL,
+                            error_message = :error
+                        WHERE event_id = :event_id
+                    """),
+                    {"event_id": event_id, "error": extraction_result.error}
+                )
+                db.commit()
                 raise self.retry(exc=Exception(extraction_result.error), countdown=countdown)
             else:
-                # 超过重试次数，进入 DLQ，但仍然提交记忆（避免前端一直显示"记忆中..."）
-                logger.error(f"LLM extraction failed after {retry_count + 1} attempts, moving to dlq but committing memory")
+                # 超过重试次数，标记 pending_review，但仍然提交记忆（避免前端一直显示"记忆中..."）
+                logger.error(f"LLM extraction failed after {retry_count + 1} attempts, marking pending_review but committing memory")
                 db.execute(
                     text("""
                         UPDATE outbox_events 
-                        SET status = 'dlq', 
+                        SET status = 'pending_review', 
                             error_message = :error,
-                            processed_at = NOW()
+                            processed_at = NOW(),
+                            processing_started_at = NULL
                         WHERE event_id = :event_id
                     """),
                     {"event_id": event_id, "error": extraction_result.error}
                 )
                 
-                milvus_id = write_to_milvus_sync(
-                    memory_id=memory_id,
-                    user_id=user_id,
-                    content=content,
-                    embedding=embedding,
-                    valence=payload.get("valence", 0)
-                )
-
                 # 即使 LLM 失败，也要提交记忆，避免前端一直显示"记忆中..."
                 db.execute(
                     text("""
@@ -344,12 +197,10 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
                 
                 db.commit()
                 return {
-                    "status": "dlq",
+                    "status": "pending_review",
                     "event_id": event_id,
                     "memory_id": memory_id,
-                    "milvus_id": milvus_id,
                     "error": extraction_result.error,
-                    "moved_to_dlq": True,
                     "note": "Memory committed despite LLM failure to avoid frontend stuck in 'remembering' state"
                 }
         
@@ -370,44 +221,75 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
         # 使用校验后的实体和关系
         validated_entities = critic_result.entities
         validated_relations = critic_result.relations
-
-        _assign_relation_times(content, validated_entities, validated_relations)
         
         # 5. 写入 Milvus
-        milvus_id = write_to_milvus_sync(
-            memory_id=memory_id,
-            user_id=user_id,
-            content=content,
-            embedding=embedding,
-            valence=payload.get("valence", 0)
-        )
+        milvus_id = None
+        if not milvus_written_at:
+            milvus_id = write_to_milvus_sync(
+                memory_id=memory_id,
+                user_id=user_id,
+                content=content,
+                embedding=embedding,
+                valence=payload.get("valence", 0)
+            )
+            if not milvus_id:
+                raise RuntimeError("Milvus write failed")
+            db.execute(
+                text("""
+                    UPDATE outbox_events
+                    SET milvus_written_at = NOW()
+                    WHERE event_id = :event_id
+                """),
+                {"event_id": event_id}
+            )
+            db.commit()
         
         # 6. 写入 Neo4j（使用 IR Critic 校验后的结果）
-        time_iso, time_epoch_ms = _extract_event_time_from_content(content)
-        neo4j_result = write_ir_to_neo4j(
-            user_id=user_id,
-            entities=validated_entities,
-            relations=validated_relations,
-            metadata=extraction_result.metadata,
-            conversation_id=payload.get("conversation_id"),
-            time_iso=time_iso,
-            time_epoch_ms=time_epoch_ms,
-        )
+        neo4j_result = None
+        if not neo4j_written_at:
+            neo4j_result = write_ir_to_neo4j(
+                event_id=event_id,
+                user_id=user_id,
+                entities=validated_entities,
+                relations=validated_relations,
+                metadata=extraction_result.metadata,
+                conversation_id=payload.get("conversation_id")
+            )
+            if isinstance(neo4j_result, dict) and neo4j_result.get("error"):
+                raise RuntimeError("Neo4j write failed")
+            db.execute(
+                text("""
+                    UPDATE outbox_events
+                    SET neo4j_written_at = NOW()
+                    WHERE event_id = :event_id
+                """),
+                {"event_id": event_id}
+            )
+            db.commit()
         
-        # 7. 更新 Outbox 状态为 done
+        state = db.execute(
+            text("""
+                SELECT milvus_written_at, neo4j_written_at
+                FROM outbox_events
+                WHERE event_id = :event_id
+            """),
+            {"event_id": event_id}
+        ).fetchone()
+        if not state or not state[0] or not state[1]:
+            raise RuntimeError("Outbox incomplete after writes")
+
         db.execute(
             text("""
-                UPDATE outbox_events 
-                SET status = 'done', processed_at = NOW()
+                UPDATE outbox_events
+                SET status = 'done', processed_at = NOW(), processing_started_at = NULL
                 WHERE event_id = :event_id
             """),
             {"event_id": event_id}
         )
-        
-        # 8. 更新 Memory 状态为 committed
+
         db.execute(
             text("""
-                UPDATE memories 
+                UPDATE memories
                 SET status = 'committed', committed_at = NOW()
                 WHERE id = :id
             """),
@@ -438,9 +320,47 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
         if retry_count < settings.OUTBOX_MAX_RETRIES:
             countdown = settings.OUTBOX_BACKOFF_BASE ** retry_count
             logger.info(f"Retrying event {event_id} in {countdown}s (attempt {retry_count + 1})")
+            try:
+                db.execute(
+                    text("""
+                        UPDATE outbox_events
+                        SET status = 'pending',
+                            retry_count = retry_count + 1,
+                            processing_started_at = NULL,
+                            error_message = :error
+                        WHERE event_id = :event_id
+                    """),
+                    {"event_id": event_id, "error": str(e)}
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
             raise self.retry(exc=e, countdown=countdown)
         else:
-            move_to_dlq_sync(event_id, str(e))
+            try:
+                db.execute(
+                    text("""
+                        UPDATE outbox_events
+                        SET status = 'pending_review',
+                            error_message = :error,
+                            processed_at = NOW(),
+                            processing_started_at = NULL
+                        WHERE event_id = :event_id
+                    """),
+                    {"event_id": event_id, "error": str(e)}
+                )
+                db.execute(
+                    text("""
+                        UPDATE memories
+                        SET status = 'committed', committed_at = NOW()
+                        WHERE id = :id AND status = 'pending'
+                    """),
+                    {"id": payload.get("memory_id")}
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                move_to_dlq_sync(event_id, str(e))
             return {
                 "status": "failed",
                 "event_id": event_id,
@@ -473,10 +393,7 @@ def process_pending_events():
         processed_count = 0
         for event_id, payload in pending_events:
             payload_dict = json.loads(payload) if isinstance(payload, str) else payload
-            if settings.OUTBOX_INLINE_PROCESSING:
-                process_outbox_event.apply(args=(event_id, payload_dict)).get()
-            else:
-                process_outbox_event.delay(event_id, payload_dict)
+            process_outbox_event.delay(event_id, payload_dict)
             processed_count += 1
         
         logger.info(f"Dispatched {processed_count} pending events")
@@ -488,6 +405,81 @@ def process_pending_events():
         
     except Exception as e:
         logger.error(f"Failed to process pending events: {e}")
+        return {"status": "error", "error": str(e)}
+    finally:
+        db.close()
+
+
+@celery_app.task
+def requeue_stuck_processing_events():
+    from sqlalchemy import text
+
+    db = get_sync_db_session()
+
+    try:
+        result = db.execute(
+            text("""
+                UPDATE outbox_events
+                SET status = 'pending',
+                    retry_count = retry_count + 1,
+                    processing_started_at = NULL,
+                    error_message = COALESCE(error_message, 'processing timeout')
+                WHERE status = 'processing'
+                  AND processing_started_at IS NOT NULL
+                  AND processing_started_at < NOW() - (:timeout_s * INTERVAL '1 second')
+                RETURNING event_id
+            """),
+            {"timeout_s": settings.OUTBOX_PROCESSING_TIMEOUT_S}
+        )
+        event_ids = [row[0] for row in result.fetchall()]
+        db.commit()
+        if event_ids:
+            logger.warning(f"Re-queued {len(event_ids)} stuck processing outbox events")
+        return {"status": "completed", "requeued_count": len(event_ids)}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to re-queue stuck processing events: {e}")
+        return {"status": "error", "error": str(e)}
+    finally:
+        db.close()
+
+
+@celery_app.task
+def reconcile_incomplete_outbox_events(limit: int = 200):
+    from sqlalchemy import text
+
+    db = get_sync_db_session()
+    try:
+        result = db.execute(
+            text("""
+                WITH candidates AS (
+                    SELECT id
+                    FROM outbox_events
+                    WHERE status IN ('pending_review', 'done')
+                      AND (milvus_written_at IS NULL OR neo4j_written_at IS NULL)
+                    ORDER BY created_at
+                    LIMIT :limit
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE outbox_events e
+                SET status = 'pending',
+                    retry_count = e.retry_count + 1,
+                    processing_started_at = NULL,
+                    error_message = COALESCE(e.error_message, 'reconcile incomplete')
+                FROM candidates
+                WHERE e.id = candidates.id
+                RETURNING e.event_id
+            """),
+            {"limit": limit}
+        )
+        event_ids = [row[0] for row in result.fetchall()]
+        db.commit()
+        if event_ids:
+            logger.warning(f"Reconciled {len(event_ids)} incomplete outbox events")
+        return {"status": "completed", "requeued_count": len(event_ids)}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to reconcile incomplete outbox events: {e}")
         return {"status": "error", "error": str(e)}
     finally:
         db.close()
@@ -574,7 +566,10 @@ def move_to_dlq_sync(event_id: str, error_message: str):
         db.execute(
             text("""
                 UPDATE outbox_events 
-                SET status = 'dlq', error_message = :error_message
+                SET status = 'dlq',
+                    error_message = :error_message,
+                    processed_at = NOW(),
+                    processing_started_at = NULL
                 WHERE event_id = :event_id
             """),
             {"event_id": event_id, "error_message": error_message}
@@ -626,13 +621,12 @@ def get_weight_for_relation(relation_type: str) -> tuple:
 
 
 def write_ir_to_neo4j(
+    event_id: str,
     user_id: str,
     entities: List[Dict],
     relations: List[Dict],
     metadata: Dict,
-    conversation_id: str,
-    time_iso: str | None = None,
-    time_epoch_ms: int | None = None,
+    conversation_id: str
 ) -> Dict:
     """
     将 LLM 抽取的 IR 写入 Neo4j
@@ -642,13 +636,8 @@ def write_ir_to_neo4j(
     - Entity → Entity 关系（网状结构）
     - 带 provenance 的审计信息
     """
-    from neo4j import GraphDatabase
-    
     try:
-        driver = GraphDatabase.driver(
-            settings.NEO4J_URI,
-            auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
-        )
+        driver = get_sync_neo4j_driver()
         
         created_entities = []
         created_relations = []
@@ -660,6 +649,15 @@ def write_ir_to_neo4j(
                 MERGE (u:User {id: $user_id})
                 ON CREATE SET u.created_at = datetime(), u.name = '我'
                 """,
+                user_id=user_id
+            )
+
+            session.run(
+                """
+                MERGE (evt:OutboxEvent {id: $event_id, user_id: $user_id})
+                ON CREATE SET evt.created_at = datetime()
+                """,
+                event_id=event_id,
                 user_id=user_id
             )
             
@@ -678,21 +676,28 @@ def write_ir_to_neo4j(
                 
                 result = session.run(
                     f"""
+                    MERGE (evt:OutboxEvent {{id: $event_id, user_id: $user_id}})
+                    ON CREATE SET evt.created_at = datetime()
                     MERGE (e:{label} {{id: $id, user_id: $user_id}})
                     ON CREATE SET 
                         e.name = $name,
                         e.type = $type,
                         e.confidence = $confidence,
                         e.created_at = datetime(),
-                        e.last_mentioned_at = datetime(),
-                        e.mention_count = 1,
                         e.source = $source,
-                        e.model_version = $model_version
-                    ON MATCH SET 
-                        e.last_mentioned_at = datetime(),
-                        e.mention_count = e.mention_count + 1
+                        e.model_version = $model_version,
+                        e.mention_count = 0,
+                        e.last_mentioned_at = datetime()
+                    MERGE (evt)-[m:MENTIONED]->(e)
+                    ON CREATE SET
+                        m.created_at = datetime(),
+                        e.mention_count = coalesce(e.mention_count, 0) + 1,
+                        e.last_mentioned_at = datetime()
+                    ON MATCH SET
+                        e.last_mentioned_at = datetime()
                     RETURN e.id AS id
                     """,
+                    event_id=event_id,
                     id=ent_id,
                     name=ent.get("name", ""),
                     type=ent_type,
@@ -710,8 +715,6 @@ def write_ir_to_neo4j(
                 source_id = rel.get("source")
                 target_id = rel.get("target")
                 rel_type = rel.get("type", "RELATED_TO").upper()
-                rel_time_iso = rel.get("time_iso") or time_iso
-                rel_time_epoch_ms = rel.get("time_epoch_ms") if rel.get("time_epoch_ms") is not None else time_epoch_ms
                 
                 if not source_id or not target_id:
                     continue
@@ -738,14 +741,10 @@ def write_ir_to_neo4j(
                             r.confidence = $confidence,
                             r.created_at = datetime(),
                             r.updated_at = datetime(),
-                            r.source = $source,
-                            r.time_iso = $time_iso,
-                            r.time_epoch_ms = $time_epoch_ms
+                            r.source = $source
                         ON MATCH SET 
                             r.updated_at = datetime(),
-                            r.weight = CASE WHEN r.weight < $weight THEN $weight ELSE r.weight END,
-                            r.time_iso = coalesce(r.time_iso, $time_iso),
-                            r.time_epoch_ms = coalesce(r.time_epoch_ms, $time_epoch_ms)
+                            r.weight = CASE WHEN r.weight < $weight THEN $weight ELSE r.weight END
                         """,
                         user_id=user_id,
                         target_id=target_id,
@@ -754,9 +753,7 @@ def write_ir_to_neo4j(
                         weight=weight,
                         decay_rate=decay_rate,
                         confidence=float(rel.get("confidence", 0.8)),
-                        source=metadata.get("source", "llm"),
-                        time_iso=rel_time_iso,
-                        time_epoch_ms=rel_time_epoch_ms,
+                        source=metadata.get("source", "llm")
                     )
                 else:
                     # Entity → Entity（网状结构的关键）
@@ -773,14 +770,10 @@ def write_ir_to_neo4j(
                             r.confidence = $confidence,
                             r.created_at = datetime(),
                             r.updated_at = datetime(),
-                            r.source = $source,
-                            r.time_iso = $time_iso,
-                            r.time_epoch_ms = $time_epoch_ms
+                            r.source = $source
                         ON MATCH SET 
                             r.updated_at = datetime(),
-                            r.weight = CASE WHEN r.weight < $weight THEN $weight ELSE r.weight END,
-                            r.time_iso = coalesce(r.time_iso, $time_iso),
-                            r.time_epoch_ms = coalesce(r.time_epoch_ms, $time_epoch_ms)
+                            r.weight = CASE WHEN r.weight < $weight THEN $weight ELSE r.weight END
                         """,
                         source_id=source_id,
                         target_id=target_id,
@@ -790,14 +783,11 @@ def write_ir_to_neo4j(
                         weight=weight,
                         decay_rate=decay_rate,
                         confidence=float(rel.get("confidence", 0.8)),
-                        source=metadata.get("source", "llm"),
-                        time_iso=rel_time_iso,
-                        time_epoch_ms=rel_time_epoch_ms,
+                        source=metadata.get("source", "llm")
                     )
                 
                 created_relations.append(f"{source_id}->{target_id}")
         
-        driver.close()
         logger.info(f"Wrote {len(created_entities)} entities and {len(created_relations)} relations to Neo4j")
         
         return {
@@ -854,7 +844,13 @@ def write_to_milvus_sync(
             "valence": float(valence) if valence else 0.0,
             "created_at": int(datetime.now().timestamp()),
         }]
-        
+
+        try:
+            collection.delete(expr=f"id in ['{memory_id}']")
+            collection.flush()
+        except Exception:
+            pass
+
         result = collection.insert(data)
         collection.flush()
         
@@ -873,13 +869,8 @@ def write_to_neo4j_sync(
     conversation_id: str
 ) -> List[str]:
     """写入 Neo4j 图谱（同步版本）"""
-    from neo4j import GraphDatabase
-    
     try:
-        driver = GraphDatabase.driver(
-            settings.NEO4J_URI,
-            auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
-        )
+        driver = get_sync_neo4j_driver()
         
         created_ids = []
         
@@ -940,7 +931,6 @@ def write_to_neo4j_sync(
                     decay_rate=decay_rate
                 )
         
-        driver.close()
         logger.info(f"Wrote {len(entities)} entities and {len(edges)} edges to Neo4j")
         return created_ids
         

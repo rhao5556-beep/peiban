@@ -1,4 +1,5 @@
 """数据一致性任务 - 监控与巡检"""
+import json
 import logging
 import statistics
 from datetime import datetime, timedelta
@@ -134,9 +135,9 @@ async def _check_milvus_consistency(memory_ids: List[str]) -> List[str]:
         collection = get_milvus_collection()
         
         # 查询存在的 ID
-        expr = f'entity_id in {memory_ids}'
-        results = collection.query(expr=expr, output_fields=["entity_id"])
-        existing_ids = set(r["entity_id"] for r in results)
+        expr = f"id in {json.dumps(memory_ids)}"
+        results = collection.query(expr=expr, output_fields=["id"])
+        existing_ids = set(r["id"] for r in results)
         
         missing = [mid for mid in memory_ids if mid not in existing_ids]
         
@@ -206,6 +207,73 @@ def repair_inconsistency(self, record_id: str, repair_type: str):
                 raise self.retry(exc=e)
     
     return asyncio.get_event_loop().run_until_complete(_repair())
+
+
+@celery_app.task(name="consistency.cleanup_stale_sessions", bind=True, max_retries=3)
+def cleanup_stale_sessions(self, inactive_days: int = 30, retention_days: int = 90):
+    import asyncio
+    from app.core.database import AsyncSessionLocal
+
+    async def _cleanup():
+        async with AsyncSessionLocal() as db:
+            try:
+                await db.execute(
+                    text("""
+                        UPDATE sessions s
+                        SET ended_at = t.last_turn_at
+                        FROM (
+                            SELECT session_id, MAX(created_at) AS last_turn_at
+                            FROM conversation_turns
+                            GROUP BY session_id
+                        ) t
+                        WHERE s.id = t.session_id
+                          AND s.ended_at IS NULL
+                          AND t.last_turn_at < NOW() - (:inactive_days || ' days')::interval
+                    """),
+                    {"inactive_days": inactive_days}
+                )
+
+                await db.execute(
+                    text("""
+                        DELETE FROM conversation_turns
+                        WHERE created_at < NOW() - (:retention_days || ' days')::interval
+                    """),
+                    {"retention_days": retention_days}
+                )
+
+                await db.execute(
+                    text("""
+                        DELETE FROM sessions
+                        WHERE ended_at IS NOT NULL
+                          AND ended_at < NOW() - (:retention_days || ' days')::interval
+                    """),
+                    {"retention_days": retention_days}
+                )
+
+                await db.commit()
+                return {"status": "completed"}
+            except Exception as e:
+                await db.rollback()
+                raise e
+
+    try:
+        return asyncio.run(_cleanup())
+    except Exception as e:
+        raise self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
+
+
+@celery_app.task(name="consistency.beat_heartbeat")
+def beat_heartbeat(ttl_seconds: int = 120):
+    import asyncio
+    import redis.asyncio as redis
+    from app.core.database import redis_client
+
+    async def _run():
+        r = redis_client or redis.from_url(settings.REDIS_URL, decode_responses=True)
+        await r.set("celerybeat:heartbeat", datetime.utcnow().isoformat(), ex=int(ttl_seconds))
+        return True
+
+    return asyncio.run(_run())
 
 
 async def _repair_neo4j_missing(db, record_uuid) -> Dict:

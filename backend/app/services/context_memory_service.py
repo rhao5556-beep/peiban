@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 import openai
+from circuitbreaker import circuit
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
@@ -70,6 +71,10 @@ class ContextMemoryService:
             api_key=settings.OPENAI_API_KEY,
             base_url=settings.OPENAI_API_BASE
         )
+
+    @circuit(failure_threshold=5, recovery_timeout=60)
+    async def _chat_completion(self, **kwargs):
+        return await self.llm_client.chat.completions.create(**kwargs)
     
     async def extract_session_summary(
         self,
@@ -105,7 +110,7 @@ class ContextMemoryService:
         
         # 使用 LLM 提取摘要
         try:
-            response = await self.llm_client.chat.completions.create(
+            response = await self._chat_completion(
                 model="Qwen/Qwen2.5-7B-Instruct",  # 使用较小模型节省成本
                 messages=[
                     {

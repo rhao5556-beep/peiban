@@ -246,12 +246,12 @@ Respond in JSON: {"correct": true/false, "confidence": 0.0-1.0, "reasoning": "..
 
 ### API 配置
 
-默认使用 SiliconFlow 的 DeepSeek-V3：
+默认使用 SiliconFlow 的 DeepSeek-V3.2：
 
 ```bash
 OPENAI_API_KEY=<your_key>
 OPENAI_API_BASE=https://api.siliconflow.cn/v1
-OPENAI_MODEL=deepseek-ai/DeepSeek-V3
+OPENAI_MODEL=Pro/deepseek-ai/DeepSeek-V3.2
 ```
 
 可以切换到其他 OpenAI 兼容的 API。

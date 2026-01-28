@@ -9,6 +9,7 @@ from app.services.content_pool_manager_service import ContentPoolManagerService
 from app.services.safety_screener_service import SafetyScreenerService
 from app.services.trend_analyzer_service import TrendAnalyzerService
 from app.core.database import AsyncSessionLocal
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,18 @@ def aggregate_trending_memes(self):
     async def _aggregate():
         start_time = datetime.now()
         logger.info("Starting meme aggregation task")
+
+        try:
+            from app.core.database import redis_client
+            import redis.asyncio as redis
+            r = redis_client or redis.from_url(settings.REDIS_URL, decode_responses=True)
+            lock_key = "locks:meme:aggregate_trending_memes"
+            acquired = await r.set(lock_key, str(start_time.timestamp()), nx=True, ex=3600)
+            if not acquired:
+                logger.info("Meme aggregation skipped due to existing distributed lock")
+                return {"success": True, "skipped": True, "reason": "locked"}
+        except Exception:
+            pass
         
         # 统计指标
         total_fetched = 0

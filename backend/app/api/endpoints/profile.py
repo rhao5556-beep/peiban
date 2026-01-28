@@ -1,12 +1,16 @@
 """用户画像端点"""
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+import uuid
 
 from app.core.security import get_current_user
 from app.core.database import get_db
+from app.core.config import settings
+from app.models.user import User
 from app.services.user_profile_service import (
     UserProfileService,
     ProfileUpdateSignals as ServiceSignals
@@ -63,6 +67,21 @@ class ProfileUpdateRequest(BaseModel):
     hour_of_day: Optional[int] = None
 
 
+class UserSettingsModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    version: int = 1
+    timezone: Optional[str] = None
+    locale: Optional[str] = None
+    ui: Dict[str, Any] = Field(default_factory=dict)
+    notifications: Dict[str, Any] = Field(default_factory=dict)
+    proactive_rules: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class UserSettingsUpdateRequest(UserSettingsModel):
+    pass
+
+
 @router.get("/{user_id}/profile", response_model=UserProfileResponse)
 async def get_user_profile(
     user_id: str,
@@ -115,8 +134,65 @@ async def get_user_profile(
         
     except Exception as e:
         import logging
-        logging.error(f"Failed to get user profile: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Failed to get user profile: {e.__class__.__name__}")
+        raise HTTPException(status_code=500, detail="Internal error")
+
+
+@router.get("/{user_id}/settings", response_model=UserSettingsModel)
+async def get_user_settings(
+    user_id: str,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Cannot access other user's settings")
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user_id format")
+
+    result = await db.execute(select(User).where(User.id == user_uuid))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return UserSettingsModel.model_validate(user.settings or {})
+
+
+@router.put("/{user_id}/settings", response_model=UserSettingsModel)
+async def update_user_settings(
+    user_id: str,
+    request: UserSettingsUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    if current_user["user_id"] != user_id:
+        raise HTTPException(status_code=403, detail="Cannot update other user's settings")
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user_id format")
+
+    result = await db.execute(select(User).where(User.id == user_uuid))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    validated = UserSettingsModel.model_validate(request.model_dump(exclude_none=True))
+    try:
+        import json
+
+        raw = json.dumps(validated.model_dump(), ensure_ascii=False).encode("utf-8")
+        if len(raw) > settings.JSON_FIELD_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Settings payload too large")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid settings payload")
+    user.settings = validated.model_dump()
+    await db.commit()
+    await db.refresh(user)
+    return validated
 
 
 @router.post("/{user_id}/profile/update", response_model=UserProfileResponse)
@@ -180,8 +256,8 @@ async def update_user_profile(
         
     except Exception as e:
         import logging
-        logging.error(f"Failed to update user profile: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Failed to update user profile: {e.__class__.__name__}")
+        raise HTTPException(status_code=500, detail="Internal error")
 
 
 @router.get("/{user_id}/interests", response_model=List[InterestResponse])
@@ -210,5 +286,5 @@ async def get_user_interests(
         
     except Exception as e:
         import logging
-        logging.error(f"Failed to get user interests: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Failed to get user interests: {e.__class__.__name__}")
+        raise HTTPException(status_code=500, detail="Internal error")

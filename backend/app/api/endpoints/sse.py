@@ -48,7 +48,7 @@ async def generate_stream_response(
     Yields:
         SSE 格式的 JSON 数据
     """
-    logger.info(f"=== SSE Stream Start: user={user_id}, message={message[:50]}")
+    logger.info(f"=== SSE Stream Start: user_id_prefix={str(user_id)[:8]}, message_len={len(message)}")
     
     # 创建独立的数据库 session（因为 SSE 是长连接）
     async with AsyncSessionLocal() as db_session:
@@ -91,7 +91,7 @@ async def generate_stream_response(
                  logger.warning(f"Failed to get milvus collection: {e}")
 
             # 初始化 ConversationService
-            logger.info("Initializing ConversationService with injected dependencies...")
+            logger.info("Initializing ConversationService...")
             conversation_service = ConversationService(
                 affinity_service=affinity_service,
                 retrieval_service=retrieval_service,
@@ -99,14 +99,14 @@ async def generate_stream_response(
                 transaction_manager=transaction_manager,
                 idempotency_checker=idempotency_checker
             )
-            logger.info("ConversationService initialized successfully")
+            logger.info("ConversationService initialized")
             
             yield json.dumps({
                 "type": "start",
                 "session_id": session_id
             })
 
-            logger.info("Starting process_message_stream...")
+            logger.info("Starting process_message_stream")
             async for delta in conversation_service.process_message_stream(
                 user_id=user_id,
                 session_id=session_id,
@@ -114,7 +114,7 @@ async def generate_stream_response(
                 idempotency_key=idempotency_key
             ):
                 # 将 ConversationDelta 转换为 JSON
-                logger.debug(f"Delta: type={delta.type}, content={delta.content[:20] if delta.content else None}")
+                logger.debug(f"Delta: type={delta.type}")
                 yield json.dumps({
                     "type": delta.type,
                     "content": delta.content,
@@ -128,7 +128,7 @@ async def generate_stream_response(
             logger.error(f"=== SSE Stream Error: {e}", exc_info=True)
             yield json.dumps({
                 "type": "error",
-                "content": str(e)
+                "content": "Internal error"
             })
 
 
@@ -153,7 +153,8 @@ async def stream_message(
     
     return EventSourceResponse(
         generate_stream_response(user_id, request.message, session_id, idempotency_key),
-        media_type="text/event-stream"
+        media_type="text/event-stream",
+        ping=15
     )
 
 

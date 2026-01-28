@@ -22,5 +22,4 @@ END $$;
 
 ALTER TABLE outbox_events
     ADD CONSTRAINT outbox_events_status_check
-    CHECK (status IN ('pending', 'processing', 'done', 'failed', 'dlq'));
-
+    CHECK (status IN ('pending', 'processing', 'done', 'failed', 'dlq', 'pending_review'));

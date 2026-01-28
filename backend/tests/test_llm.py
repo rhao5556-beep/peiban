@@ -9,14 +9,13 @@ async def test_llm():
         base_url=settings.OPENAI_API_BASE
     )
     
-    print(f"API Key: {settings.OPENAI_API_KEY[:20]}...")
     print(f"API Base: {settings.OPENAI_API_BASE}")
-    print(f"Model: deepseek-ai/DeepSeek-V3")
+    print(f"Model: {settings.OPENAI_MODEL}")
     print("\n开始测试流式调用...\n")
     
     try:
         response = await client.chat.completions.create(
-            model="deepseek-ai/DeepSeek-V3",
+            model=settings.OPENAI_MODEL,
             messages=[
                 {"role": "user", "content": "你好，请用一句话介绍你自己"}
             ],

@@ -1,5 +1,6 @@
 """表情包 API 端点"""
 import logging
+import time
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -132,12 +133,32 @@ async def submit_meme_feedback(
                 detail=f"Invalid reaction. Must be one of: {valid_reactions}"
             )
         
+        user_id = UUID(str(current_user["user_id"]))
+
+        try:
+            from app.core.database import get_redis_client
+            redis = get_redis_client()
+            key = f"meme:feedback:{user_id}:{int(time.time() // 60)}"
+            count = await redis.incr(key)
+            if count == 1:
+                await redis.expire(key, 120)
+            if count > 30:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many feedback requests"
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
         # 初始化服务
         usage_history_service = MemeUsageHistoryService(db)
         
         # 记录反馈
         success = await usage_history_service.record_feedback(
             usage_id=feedback.usage_id,
+            user_id=user_id,
             reaction=feedback.reaction
         )
         
@@ -147,10 +168,7 @@ async def submit_meme_feedback(
                 detail="Usage record not found"
             )
         
-        logger.info(
-            f"Recorded meme feedback: user={current_user['user_id']}, "
-            f"usage={feedback.usage_id}, reaction={feedback.reaction}"
-        )
+        logger.info(f"Recorded meme feedback: user_id_prefix={str(user_id)[:8]}, reaction={feedback.reaction}")
         
         return {
             "success": True,

@@ -48,7 +48,7 @@ curl http://localhost:8000/api/v1/health
 
 ```bash
 # 在项目根目录执行
-python evals/run_knowmebench_dataset1_pipeline.py \
+python affinity_evals/knowmebench/run_dataset1_pipeline.py \
   --backend_base_url http://localhost:8000 \
   --mode graph_only \
   --eval_mode \
@@ -67,7 +67,7 @@ python evals/run_knowmebench_dataset1_pipeline.py \
 
 **快速测试示例（每个任务只跑 5 题）：**
 ```bash
-python evals/run_knowmebench_dataset1_pipeline.py \
+python affinity_evals/knowmebench/run_dataset1_pipeline.py \
   --backend_base_url http://localhost:8000 \
   --mode graph_only \
   --eval_mode \
@@ -77,7 +77,7 @@ python evals/run_knowmebench_dataset1_pipeline.py \
 
 **运行特定任务：**
 ```bash
-python evals/run_knowmebench_dataset1_pipeline.py \
+python affinity_evals/knowmebench/run_dataset1_pipeline.py \
   --backend_base_url http://localhost:8000 \
   --mode graph_only \
   --eval_mode \
@@ -97,10 +97,9 @@ outputs/knowmebench_run/ds1_pipeline_graph_only_<timestamp>/
 
 ```bash
 # 对步骤 1 的输出进行评分
-python evals/run_knowmebench_official_judge.py \
+python affinity_evals/knowmebench/official_judge.py \
   --input_dir outputs/knowmebench_run/ds1_pipeline_graph_only_<timestamp> \
   --output_file outputs/knowmebench_run/ds1_pipeline_graph_only_<timestamp>/judge_results.json \
-  --judge_model Pro/deepseek-ai/DeepSeek-V3.2 \
   --concurrency 4
 ```
 
@@ -125,7 +124,7 @@ python evals/run_knowmebench_official_judge.py \
       "task_type": "Information Extraction",
       "score": 5,
       "reasoning": "关键事实完全正确且无多余编造",
-      "status": "success"
+      "status": "ok"
     }
   ]
 }
@@ -147,7 +146,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 # 2. 在新终端运行评测（完整版）
 cd ..
-python evals/run_knowmebench_dataset1_pipeline.py \
+python affinity_evals/knowmebench/run_dataset1_pipeline.py \
   --backend_base_url http://localhost:8000 \
   --mode graph_only \
   --eval_mode \
@@ -157,10 +156,9 @@ python evals/run_knowmebench_dataset1_pipeline.py \
 # 脚本会在最后一行打印输出目录路径
 
 # 4. 运行 Judge 评分
-python evals/run_knowmebench_official_judge.py \
+python affinity_evals/knowmebench/official_judge.py \
   --input_dir outputs/knowmebench_run/ds1_pipeline_graph_only_20260126_143022 \
   --output_file outputs/knowmebench_run/ds1_pipeline_graph_only_20260126_143022/judge_results.json \
-  --judge_model Pro/deepseek-ai/DeepSeek-V3.2 \
   --concurrency 4
 
 # 5. 查看结果

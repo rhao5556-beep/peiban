@@ -1,61 +1,89 @@
+"""评测辅助端点"""
 import asyncio
 import time
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import text
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
-from app.core.database import get_db
 from app.core.security import get_current_user
+from app.core.database import get_db
+from app.core.ids import normalize_uuid
 
 
 router = APIRouter()
 
 
 @router.get("/outbox/wait")
-async def wait_outbox_drain(
-    session_id: str = Query(..., min_length=8),
-    timeout_s: float = Query(60.0, ge=0.1, le=600.0),
-    poll_interval_ms: int = Query(200, ge=50, le=5000),
+async def wait_outbox_committed(
+    session_id: str,
+    timeout_s: int = 60,
+    poll_interval_ms: int = 200,
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    user_id = current_user["user_id"]
-    start = time.time()
-    last_pending = None
+    user_id = normalize_uuid(current_user["user_id"])
+    session_id = normalize_uuid(session_id)
 
+    deadline = time.monotonic() + max(1, int(timeout_s))
+    poll_s = max(0.05, poll_interval_ms / 1000.0)
+
+    last_state = None
     while True:
-        result = await db.execute(
-            text(
-                """
-                SELECT COUNT(*) AS c
-                FROM outbox_events
-                WHERE status IN ('pending', 'processing')
-                  AND payload->>'conversation_id' = :sid
-                  AND payload->>'user_id' = :uid
-                """
-            ),
-            {"sid": session_id, "uid": user_id},
-        )
-        pending_count = int(result.scalar() or 0)
-        last_pending = pending_count
+        memories_row = (
+            await db.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (WHERE status = 'committed') AS committed_count,
+                        COUNT(*) AS total_count
+                    FROM memories
+                    WHERE user_id::text = :user_id
+                      AND conversation_id::text = :conversation_id
+                    """
+                ),
+                {"user_id": user_id, "conversation_id": session_id},
+            )
+        ).fetchone()
 
-        elapsed = time.time() - start
-        if pending_count == 0:
-            return {
-                "ready": True,
-                "pending_count": pending_count,
-                "session_id": session_id,
-                "user_id": user_id,
-                "elapsed_s": round(elapsed, 3),
-            }
-        if elapsed >= timeout_s:
-            return {
-                "ready": False,
-                "pending_count": pending_count,
-                "session_id": session_id,
-                "user_id": user_id,
-                "elapsed_s": round(elapsed, 3),
-            }
+        committed_count = int(memories_row[0] or 0)
+        total_count = int(memories_row[1] or 0)
 
-        await asyncio.sleep(poll_interval_ms / 1000.0)
+        outbox_row = (
+            await db.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) AS outbox_total,
+                        COUNT(*) FILTER (WHERE o.status IN ('pending', 'processing')) AS outbox_inflight
+                    FROM outbox_events o
+                    JOIN memories m ON m.id::text = o.memory_id::text
+                    WHERE m.user_id::text = :user_id
+                      AND m.conversation_id::text = :conversation_id
+                    """
+                ),
+                {"user_id": user_id, "conversation_id": session_id},
+            )
+        ).fetchone()
 
+        outbox_total = int(outbox_row[0] or 0)
+        outbox_inflight = int(outbox_row[1] or 0)
+
+        ready = committed_count > 0 and ((outbox_total == 0) or (outbox_inflight == 0))
+
+        last_state = {
+            "ready": ready,
+            "session_id": session_id,
+            "user_id": user_id,
+            "committed_memories_count": committed_count,
+            "total_memories_count": total_count,
+            "outbox_total_count": outbox_total,
+            "outbox_inflight_count": outbox_inflight,
+        }
+
+        if ready:
+            return {**last_state, "timeout": False}
+
+        if time.monotonic() >= deadline:
+            return {**last_state, "timeout": True}
+
+        await asyncio.sleep(poll_s)

@@ -5,6 +5,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
+from app.core.config import settings
 
 router = APIRouter()
 
@@ -54,6 +55,18 @@ async def get_metrics_text() -> str:
             lines.append("# HELP affinity_outbox_stale_count Stale pending outbox events (>30s)")
             lines.append("# TYPE affinity_outbox_stale_count gauge")
             lines.append(f"affinity_outbox_stale_count {stale_count}")
+
+            stuck_cutoff = datetime.utcnow() - timedelta(seconds=settings.OUTBOX_PROCESSING_TIMEOUT_S)
+            stuck_processing_query = select(func.count(OutboxEvent.id)).where(
+                OutboxEvent.status == "processing",
+                OutboxEvent.processing_started_at.is_not(None),
+                OutboxEvent.processing_started_at < stuck_cutoff
+            )
+            stuck_processing_result = await db.execute(stuck_processing_query)
+            stuck_processing_count = stuck_processing_result.scalar() or 0
+            lines.append("# HELP affinity_outbox_processing_stuck_count Stuck processing outbox events")
+            lines.append("# TYPE affinity_outbox_processing_stuck_count gauge")
+            lines.append(f"affinity_outbox_processing_stuck_count {stuck_processing_count}")
             
             # 计算平均处理延迟
             one_hour_ago = datetime.utcnow() - timedelta(hours=1)
@@ -87,7 +100,7 @@ async def get_metrics_text() -> str:
             
             # DLQ 计数
             dlq_query = select(func.count(OutboxEvent.id)).where(
-                OutboxEvent.status == "failed"
+                OutboxEvent.status == "dlq"
             )
             dlq_result = await db.execute(dlq_query)
             dlq_count = dlq_result.scalar() or 0
@@ -95,6 +108,34 @@ async def get_metrics_text() -> str:
             lines.append("# HELP affinity_dlq_count Dead letter queue count")
             lines.append("# TYPE affinity_dlq_count gauge")
             lines.append(f"affinity_dlq_count {dlq_count}")
+
+            pending_review_query = select(func.count(OutboxEvent.id)).where(
+                OutboxEvent.status == "pending_review"
+            )
+            pending_review_result = await db.execute(pending_review_query)
+            pending_review_count = pending_review_result.scalar() or 0
+            lines.append("# HELP affinity_outbox_pending_review_count Outbox pending_review count")
+            lines.append("# TYPE affinity_outbox_pending_review_count gauge")
+            lines.append(f"affinity_outbox_pending_review_count {pending_review_count}")
+
+            try:
+                from app.core.database import engine
+
+                pool = engine.sync_engine.pool
+                lines.append("# HELP affinity_pg_pool_size SQLAlchemy pool size")
+                lines.append("# TYPE affinity_pg_pool_size gauge")
+                lines.append(f"affinity_pg_pool_size {pool.size()}")
+                lines.append("# HELP affinity_pg_pool_checked_in SQLAlchemy pool checked in")
+                lines.append("# TYPE affinity_pg_pool_checked_in gauge")
+                lines.append(f"affinity_pg_pool_checked_in {pool.checkedin()}")
+                lines.append("# HELP affinity_pg_pool_checked_out SQLAlchemy pool checked out")
+                lines.append("# TYPE affinity_pg_pool_checked_out gauge")
+                lines.append(f"affinity_pg_pool_checked_out {pool.checkedout()}")
+                lines.append("# HELP affinity_pg_pool_overflow SQLAlchemy pool overflow")
+                lines.append("# TYPE affinity_pg_pool_overflow gauge")
+                lines.append(f"affinity_pg_pool_overflow {pool.overflow()}")
+            except Exception:
+                pass
             
         except Exception as e:
             lines.append(f"# Error collecting metrics: {e}")

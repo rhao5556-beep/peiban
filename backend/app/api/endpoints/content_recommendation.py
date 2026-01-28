@@ -7,7 +7,7 @@
 3. 提交反馈（点击/喜欢/不喜欢）
 """
 import logging
-from datetime import datetime, time as time_type
+from datetime import datetime, time
 from typing import List, Optional, Literal
 from uuid import UUID
 
@@ -17,23 +17,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.database import get_neo4j_driver
 from app.core.security import get_current_user
-from app.services.content_recommendation_service import ContentRecommendationService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-def _parse_time_str(value: str) -> time_type:
-    value = (value or "").strip()
-    for fmt in ("%H:%M", "%H:%M:%S"):
-        try:
-            dt = datetime.strptime(value, fmt)
-            return time_type(dt.hour, dt.minute, dt.second)
-        except ValueError:
-            continue
-    raise ValueError(f"Invalid time format: {value}")
 
 
 # ==================== Pydantic 模型 ====================
@@ -154,7 +142,7 @@ async def get_content_preference(
         )
         
     except Exception as e:
-        logger.exception("Failed to get content preference")
+        logger.error(f"Failed to get content preference: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get content preference"
@@ -178,14 +166,6 @@ async def update_content_preference(
     """
     try:
         user_id = current_user["user_id"]
-        await db.execute(
-            text("""
-                INSERT INTO user_content_preference (user_id)
-                VALUES (:user_id)
-                ON CONFLICT (user_id) DO NOTHING
-            """),
-            {"user_id": user_id}
-        )
         # 构建更新语句
         updates = []
         params = {"user_id": user_id}
@@ -208,11 +188,11 @@ async def update_content_preference(
         
         if preference.quiet_hours_start is not None:
             updates.append("quiet_hours_start = :start")
-            params["start"] = _parse_time_str(preference.quiet_hours_start)
+            params["start"] = preference.quiet_hours_start
         
         if preference.quiet_hours_end is not None:
             updates.append("quiet_hours_end = :end")
-            params["end"] = _parse_time_str(preference.quiet_hours_end)
+            params["end"] = preference.quiet_hours_end
         
         if updates:
             updates.append("updated_at = NOW()")
@@ -230,7 +210,7 @@ async def update_content_preference(
         return await get_content_preference(current_user, db)
         
     except Exception as e:
-        logger.exception("Failed to update content preference")
+        logger.error(f"Failed to update content preference: {e}")
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -284,54 +264,10 @@ async def get_recommendations(
                 feedback=row[12]
             ))
         
-        if not recommendations:
-            preference = await get_content_preference(current_user, db)
-            service = ContentRecommendationService(db=db, neo4j_driver=get_neo4j_driver())
-            try:
-                await service.generate_recommendations(
-                    user_id=str(user_id),
-                    top_k=preference.max_daily_recommendations or 1
-                )
-            except Exception:
-                logger.exception("Failed to generate recommendations on-demand")
-                return []
-
-            result = await db.execute(
-                text("""
-                    SELECT 
-                        rh.id, rh.content_id, c.title, c.summary, c.content_url,
-                        c.source, c.tags, c.published_at, rh.match_score,
-                        rh.rank_position, rh.recommended_at, rh.clicked_at, rh.feedback
-                    FROM recommendation_history rh
-                    JOIN content_library c ON rh.content_id = c.id
-                    WHERE rh.user_id = :user_id
-                      AND DATE(rh.recommended_at) = CURRENT_DATE
-                    ORDER BY rh.rank_position ASC
-                """),
-                {"user_id": user_id}
-            )
-
-            for row in result.fetchall():
-                recommendations.append(RecommendationResponse(
-                    id=str(row[0]),
-                    content_id=str(row[1]),
-                    title=row[2],
-                    summary=row[3],
-                    url=row[4],
-                    source=row[5],
-                    tags=row[6] or [],
-                    published_at=row[7],
-                    match_score=row[8],
-                    rank_position=row[9],
-                    recommended_at=row[10],
-                    clicked_at=row[11],
-                    feedback=row[12]
-                ))
-
         return recommendations
         
     except Exception as e:
-        logger.exception("Failed to get recommendations")
+        logger.error(f"Failed to get recommendations: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get recommendations"
@@ -466,7 +402,7 @@ async def submit_feedback(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception("Failed to submit feedback")
+        logger.error(f"Failed to submit feedback: {e}")
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

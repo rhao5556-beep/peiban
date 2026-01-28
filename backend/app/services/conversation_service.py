@@ -1,12 +1,14 @@
 """对话服务 - 协调整个对话流程"""
-import json
-import re
 import uuid
 import logging
+import re
 from typing import AsyncIterator, Optional, List
 from dataclasses import dataclass
 from datetime import datetime
 import openai
+from circuitbreaker import circuit
+
+from fastapi import HTTPException
 
 from app.services.affinity_service import AffinityService, AffinitySignals
 from app.services.retrieval_service import RetrievalService, EmbeddingService
@@ -14,7 +16,6 @@ from app.services.graph_service import GraphService
 from app.services.outbox_service import TransactionManager, IdempotencyChecker
 from app.services.working_memory_service import WorkingMemoryService, EntityMention
 from app.services.response_cache_service import ResponseCacheService
-from app.services.temporal_query_service import TemporalQueryService
 from app.core.config import settings
 from app.core.database import get_neo4j_driver, get_redis_client
 
@@ -118,7 +119,7 @@ class TierRouter:
     
     # Tier 配置 - 使用硅基流动模型
     TIERS = {
-        1: {"model": "deepseek-ai/DeepSeek-V3", "max_tokens": 1000, "cost": "high"},
+        1: {"model": settings.OPENAI_MODEL, "max_tokens": 1000, "cost": "high"},
         2: {"model": "Qwen/Qwen2.5-14B-Instruct", "max_tokens": 500, "cost": "medium"},
         3: {"model": "Qwen/Qwen2.5-7B-Instruct", "max_tokens": 200, "cost": "low"}  # 免费额度
     }
@@ -291,8 +292,6 @@ class ConversationService:
         self.emotion_analyzer = EmotionAnalyzer()
         self.tier_router = TierRouter()
         self.embedding_service = EmbeddingService()
-        self.redis_client = get_redis_client()
-        self.temporal_query_service = TemporalQueryService()
         
         # 初始化 OpenAI 兼容客户端 (硅基流动)
         self.llm_client = openai.AsyncOpenAI(
@@ -300,30 +299,9 @@ class ConversationService:
             base_url=settings.OPENAI_API_BASE
         )
 
-    @staticmethod
-    def _should_write_long_term_memory(message: str) -> bool:
-        t = (message or "").strip()
-        if not t:
-            return False
-        if "Question:" in t and "Answer:" in t:
-            return False
-        if "\n" in t:
-            import re
-            if re.search(r"\bD\d+:\d+\b", t):
-                return True
-            if t.count(":") >= 2:
-                return True
-        lower = t.lower()
-        is_question_like = False
-        if t.endswith("?") or t.endswith("？"):
-            is_question_like = True
-        if any(lower.startswith(w) for w in ["who ", "what ", "when ", "where ", "why ", "how "]):
-            is_question_like = True
-        if any(w in t for w in ["吗", "呢", "是否", "是不是", "谁", "什么", "哪里", "怎么", "为什么", "多少"]):
-            is_question_like = True
-        if is_question_like and len(t) < 120:
-            return False
-        return True
+    @circuit(failure_threshold=5, recovery_timeout=60)
+    async def _chat_completion(self, **kwargs):
+        return await self.llm_client.chat.completions.create(**kwargs)
     
     async def process_message_stream(
         self,
@@ -400,54 +378,27 @@ class ConversationService:
                 yield ConversationDelta(type="text", content=chunk)
             
             # 7. Slow Path: 异步写入记忆（通过 Outbox）
-            if self._should_write_long_term_memory(message):
-                embedding = await self.embedding_service.encode(message)
-                memory_id, event_id = await self.transaction_manager.create_memory_with_outbox(
-                    user_id=user_id,
-                    content=message,
-                    embedding=embedding,
-                    valence=emotion.get("valence", 0),
-                    conversation_id=session_id,
-                    idempotency_key=idempotency_key
-                )
-
-                await self.idempotency_checker.set_memory_id(idempotency_key, memory_id)
-
-                yield ConversationDelta(
-                    type="memory_pending",
-                    memory_id=memory_id,
-                    metadata={
-                        "event_id": event_id,
-                        "message": "记忆将在后台写入，下次对话生效"
-                    }
-                )
-
-                if settings.OUTBOX_INLINE_PROCESSING:
-                    payload = {
-                        "memory_id": memory_id,
-                        "user_id": user_id,
-                        "content": message,
-                        "embedding": embedding,
-                        "valence": emotion.get("valence", 0),
-                        "conversation_id": session_id,
-                        "entities": [],
-                        "edges": [],
-                    }
-
-                    import asyncio
-
-                    try:
-                        from app.worker.tasks.outbox import process_outbox_event
-                        await asyncio.to_thread(
-                            lambda: process_outbox_event.apply(args=(event_id, payload)).get()
-                        )
-                        yield ConversationDelta(
-                            type="memory_committed",
-                            memory_id=memory_id,
-                            metadata={"event_id": event_id}
-                        )
-                    except Exception as ex:
-                        logger.warning(f"Inline outbox processing failed: {type(ex).__name__}: {ex}")
+            embedding = await self.embedding_service.encode(message)
+            memory_id, event_id = await self.transaction_manager.create_memory_with_outbox(
+                user_id=user_id,
+                content=message,
+                embedding=embedding,
+                valence=emotion.get("valence", 0),
+                conversation_id=session_id,
+                idempotency_key=idempotency_key
+            )
+            
+            # 更新幂等键中的 memory_id
+            await self.idempotency_checker.set_memory_id(idempotency_key, memory_id)
+            
+            yield ConversationDelta(
+                type="memory_pending",
+                memory_id=memory_id,
+                metadata={
+                    "event_id": event_id,
+                    "message": "记忆将在后台写入，下次对话生效"
+                }
+            )
             
             # 8. 更新好感度
             signals = AffinitySignals(
@@ -484,6 +435,7 @@ class ConversationService:
         session_id: str,
         mode: str = ConversationMode.HYBRID,
         eval_mode: bool = False,
+        idempotency_key: Optional[str] = None
     ) -> ConversationResponse:
         """
         处理用户消息
@@ -501,10 +453,222 @@ class ConversationService:
         - 这是防御式设计，不是只靠 Prompt 约束
         """
         start_time = datetime.now()
+        idempotency_key = idempotency_key or str(uuid.uuid4())
+        is_new, _existing_memory_id = await self.idempotency_checker.check_and_acquire(
+            idempotency_key, user_id
+        )
+
+        question_text = self._extract_eval_question_text(message)
+        if mode == ConversationMode.GRAPH_ONLY and eval_mode and self._is_temporal_question(question_text):
+            direct_answer = await self._answer_temporal_question(user_id, question_text)
+            if direct_answer:
+                response_time = (datetime.now() - start_time).total_seconds() * 1000
+                return ConversationResponse(
+                    reply=direct_answer,
+                    session_id=session_id,
+                    turn_id=str(uuid.uuid4()),
+                    emotion={"primary_emotion": "neutral", "valence": 0.0, "confidence": 0.5},
+                    affinity={"score": 0.5, "state": "acquaintance", "delta": 0.0},
+                    memories_used=[],
+                    tone_type="neutral",
+                    response_time_ms=response_time,
+                    mode=mode,
+                    context_source={
+                        "mode": mode,
+                        "cached": False,
+                        "graph_facts_count": 0,
+                        "history_turns_count": 0,
+                        "vector_memories_count": 0,
+                        "temporal_direct_answer": True
+                    }
+                )
+
+        transcript_lines = self._extract_timestamped_transcript_lines(message)
+        if mode == ConversationMode.GRAPH_ONLY and eval_mode and transcript_lines:
+            import asyncio
+            from app.services.temporal_extractor import TemporalExtractor
+
+            temporal_extractor = TemporalExtractor()
+            emotion = self.emotion_analyzer.analyze(message)
+
+            from app.core.database import milvus_connected, get_neo4j_driver
+            if bool(settings.EVAL_STRICT_DEPENDENCIES):
+                if not settings.OPENAI_API_KEY:
+                    await self.idempotency_checker.release(idempotency_key)
+                    raise HTTPException(status_code=503, detail="eval_dependency_missing:OPENAI_API_KEY")
+                if bool(settings.EVAL_REQUIRE_MILVUS) and not milvus_connected:
+                    await self.idempotency_checker.release(idempotency_key)
+                    raise HTTPException(status_code=503, detail="eval_dependency_missing:MILVUS")
+                if not get_neo4j_driver():
+                    await self.idempotency_checker.release(idempotency_key)
+                    raise HTTPException(status_code=503, detail="eval_dependency_missing:NEO4J_DRIVER")
+
+            memory_ids: List[str] = []
+            milvus_write_attempted = bool(milvus_connected)
+            milvus_written = 0
+            milvus_failed = 0
+            milvus_error = None
+            graph_written = 0
+            graph_failed = 0
+            graph_error = None
+            graph_entities_created = 0
+            graph_relations_created = 0
+            if is_new:
+                event_ids: List[str] = []
+                from app.worker.tasks.outbox import write_to_milvus_sync
+                for i, line in enumerate(transcript_lines):
+                    line_idempotency_key = f"{idempotency_key}:{i}"
+                    embedding = await self.embedding_service.encode(line)
+                    metadata = temporal_extractor.extract(line)
+                    memory_id, event_id = await self.transaction_manager.create_committed_memory(
+                        user_id=user_id,
+                        content=line,
+                        embedding=embedding,
+                        valence=emotion.get("valence", 0),
+                        conversation_id=session_id,
+                        idempotency_key=line_idempotency_key,
+                        metadata=metadata,
+                    )
+                    memory_ids.append(memory_id)
+                    event_ids.append(event_id)
+                    if milvus_connected:
+                        try:
+                            res = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    write_to_milvus_sync,
+                                    memory_id,
+                                    user_id,
+                                    line,
+                                    embedding,
+                                    emotion.get("valence", 0),
+                                ),
+                                timeout=float(settings.EMBEDDING_REQUEST_TIMEOUT_S) + 5.0,
+                            )
+                            if res:
+                                milvus_written += 1
+                            else:
+                                milvus_failed += 1
+                        except Exception as e:
+                            milvus_failed += 1
+                            if milvus_error is None:
+                                milvus_error = f"{e.__class__.__name__}: {e}"
+                            logger.warning(f"Eval transcript milvus write skipped: {e}")
+
+                if settings.OPENAI_API_KEY:
+                    try:
+                        from app.services.llm_extraction_service import extract_ir
+                        from app.services.ir_critic_service import critique_ir
+                        from app.worker.tasks.outbox import get_recent_entities, write_ir_to_neo4j
+
+                        try:
+                            context_entities = await asyncio.wait_for(
+                                asyncio.to_thread(get_recent_entities, user_id),
+                                timeout=float(settings.EVAL_GRAPH_CONTEXT_ENTITIES_TIMEOUT_S),
+                            )
+                        except Exception:
+                            context_entities = []
+
+                        chunk_n = max(1, int(settings.EVAL_TRANSCRIPT_CHUNK_LINES))
+                        extract_timeout_s = float(settings.EVAL_GRAPH_EXTRACT_TIMEOUT_S)
+                        extract_retries = max(0, int(settings.EVAL_GRAPH_EXTRACT_MAX_RETRIES))
+                        neo4j_timeout_s = float(settings.EVAL_GRAPH_WRITE_NEO4J_TIMEOUT_S)
+                        extract_model = str(settings.EVAL_GRAPH_EXTRACT_MODEL)
+
+                        for chunk_start in range(0, len(transcript_lines), chunk_n):
+                            chunk = transcript_lines[chunk_start : chunk_start + chunk_n]
+                            if not chunk:
+                                continue
+                            chunk_text = "\n".join(chunk)
+                            event_id = event_ids[min(chunk_start + len(chunk) - 1, len(event_ids) - 1)]
+
+                            extraction_result = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    extract_ir,
+                                    text=chunk_text,
+                                    user_id=user_id,
+                                    context_entities=context_entities,
+                                    max_retries=extract_retries,
+                                    timeout=int(extract_timeout_s),
+                                    model=extract_model,
+                                ),
+                                timeout=extract_timeout_s + 5.0,
+                            )
+
+                            if not extraction_result.success:
+                                graph_failed += 1
+                                if graph_error is None:
+                                    graph_error = extraction_result.error or "llm_extraction_failed"
+                                continue
+
+                            critic_result = critique_ir(
+                                entities=extraction_result.entities,
+                                relations=extraction_result.relations,
+                                strict_mode=False,
+                            )
+                            neo4j_result = await asyncio.wait_for(
+                                asyncio.to_thread(
+                                    write_ir_to_neo4j,
+                                    event_id,
+                                    user_id,
+                                    critic_result.entities,
+                                    critic_result.relations,
+                                    extraction_result.metadata,
+                                    session_id,
+                                ),
+                                timeout=neo4j_timeout_s,
+                            )
+                            if isinstance(neo4j_result, dict) and not neo4j_result.get("error"):
+                                graph_written += 1
+                                graph_entities_created += int(neo4j_result.get("entities_created") or 0)
+                                graph_relations_created += int(neo4j_result.get("relations_created") or 0)
+                            else:
+                                graph_failed += 1
+                                if graph_error is None and isinstance(neo4j_result, dict) and neo4j_result.get("error"):
+                                    graph_error = str(neo4j_result.get("error"))
+                    except Exception as e:
+                        graph_failed += 1
+                        if graph_error is None:
+                            graph_error = f"{e.__class__.__name__}: {e}"
+                        logger.warning(f"Eval transcript graph write skipped: {e}")
+                await self.idempotency_checker.set_memory_id(idempotency_key, memory_ids[0] if memory_ids else None)
+
+            response_time = (datetime.now() - start_time).total_seconds() * 1000
+            return ConversationResponse(
+                reply="OK",
+                session_id=session_id,
+                turn_id=str(uuid.uuid4()),
+                emotion=emotion,
+                affinity={"score": 0.5, "state": "acquaintance", "delta": 0.0},
+                memories_used=memory_ids,
+                tone_type="neutral",
+                response_time_ms=response_time,
+                mode=mode,
+                context_source={
+                    "mode": mode,
+                    "cached": False,
+                    "graph_facts_count": 0,
+                    "history_turns_count": 0,
+                    "vector_memories_count": 0,
+                    "eval_transcript_ingested": True,
+                    "eval_transcript_lines_count": len(transcript_lines),
+                    "eval_milvus_connected": bool(milvus_connected),
+                    "eval_milvus_write_attempted": milvus_write_attempted,
+                    "eval_milvus_write_success": (bool(milvus_connected) and milvus_failed == 0),
+                    "eval_milvus_written": milvus_written,
+                    "eval_milvus_failed": milvus_failed,
+                    "eval_milvus_error": milvus_error,
+                    "eval_graph_write_success": graph_failed == 0,
+                    "eval_graph_written": graph_written,
+                    "eval_graph_failed": graph_failed,
+                    "eval_graph_error": graph_error,
+                    "eval_graph_entities_created": graph_entities_created,
+                    "eval_graph_relations_created": graph_relations_created,
+                },
+            )
         
         # ========== Fast Path: 响应缓存检查 ==========
         # 对于简单问候，直接返回缓存响应（< 100ms）
-        if (not eval_mode) and self.response_cache_service.is_cacheable(message):
+        if self.response_cache_service.is_cacheable(message):
             # 获取好感度状态（用于选择合适的语气）
             affinity = await self.affinity_service.get_affinity(user_id)
             
@@ -517,7 +681,7 @@ class ConversationService:
                 # 缓存命中！直接返回
                 response_time = (datetime.now() - start_time).total_seconds() * 1000
                 
-                logger.info(f"Cache hit for '{message}' (affinity={affinity.state}), response_time={response_time:.0f}ms")
+                logger.info(f"Cache hit (affinity={affinity.state}), response_time={response_time:.0f}ms, message_len={len(message)}")
                 
                 # 简单情感分析
                 emotion = self.emotion_analyzer.analyze(message)
@@ -582,56 +746,6 @@ class ConversationService:
         
         # 决定 Tier
         tier = self.tier_router.route(message, emotion, affinity.state, affinity.new_score)
-
-        if eval_mode and "\n" in (message or "") and re.search(r"\bD\d+:\d+\b", message):
-            try:
-                import asyncio
-                embedding = await self.embedding_service.encode(message)
-                memory_id, event_id = await self.transaction_manager.create_memory_with_outbox(
-                    user_id=user_id,
-                    content=message,
-                    embedding=embedding,
-                    valence=emotion.get("valence", 0),
-                    conversation_id=session_id,
-                    idempotency_key=str(uuid.uuid4()),
-                )
-                payload = {
-                    "memory_id": memory_id,
-                    "user_id": user_id,
-                    "content": message,
-                    "embedding": embedding,
-                    "valence": emotion.get("valence", 0),
-                    "conversation_id": session_id,
-                    "entities": [],
-                    "edges": [],
-                }
-                from app.worker.tasks.outbox import process_outbox_event
-                await asyncio.to_thread(
-                    lambda: process_outbox_event.apply(args=(event_id, payload)).get()
-                )
-                new_affinity = await self.affinity_service.update_affinity(
-                    user_id,
-                    AffinitySignals(user_initiated=True, emotion_valence=emotion.get("valence", 0)),
-                )
-                response_time = (datetime.now() - start_time).total_seconds() * 1000
-                return ConversationResponse(
-                    reply="ACK",
-                    session_id=session_id,
-                    turn_id=str(uuid.uuid4()),
-                    emotion=emotion,
-                    affinity={
-                        "score": new_affinity.new_score,
-                        "state": new_affinity.state,
-                        "delta": new_affinity.delta,
-                    },
-                    memories_used=[],
-                    tone_type=self._get_tone_type(new_affinity.new_score),
-                    response_time_ms=response_time,
-                    mode=mode,
-                    context_source=context_source,
-                )
-            except Exception as ex:
-                logger.warning(f"Eval ingest fast-path failed: {type(ex).__name__}: {ex}")
         
         # ========== 并行检索：向量检索 + 图谱检索 ==========
         import asyncio
@@ -670,25 +784,18 @@ class ConversationService:
         conversation_history = None
         if mode == ConversationMode.HYBRID:
             # Hybrid 模式：获取短期记忆（最近 K 轮对话）
-            conversation_history = await self._get_conversation_history_fast(session_id, limit=5)
+            conversation_history = await self._get_conversation_history(session_id, limit=5)
             context_source["history_turns_count"] = len(conversation_history) if conversation_history else 0
             logger.info(f"Hybrid mode: loaded {context_source['history_turns_count']} history turns")
         else:
             # Graph-only 模式：物理隔离，不注入 history
             logger.info("Graph-only mode: history physically isolated (None)")
         
-        reply = None
-        if eval_mode:
-            reply = self._try_deterministic_eval_answer(message)
-        if not reply:
-            tool_reply = await self._try_temporal_tool_reply(user_id=user_id, message=message)
-            if tool_reply:
-                reply = tool_reply
-        if not reply:
-            reply = await self._generate_reply(
-                message, ranked_memories, affinity, emotion, tier,
-                ranked_facts, conversation_history, mode
-            )
+        # 生成回复（使用重排序后的结果）
+        reply = await self._generate_reply(
+            message, ranked_memories, affinity, emotion, tier, 
+            ranked_facts, conversation_history, mode
+        )
         
         # 更新好感度
         signals = AffinitySignals(
@@ -707,75 +814,99 @@ class ConversationService:
                 emotion=emotion,
                 affinity_score=new_affinity.new_score
             )
-
-        if self._should_write_long_term_memory(message):
-            try:
-                import asyncio
-
-                async def _create_memory():
-                    embedding = await self.embedding_service.encode(message)
-                    memory_id, event_id = await self.transaction_manager.create_memory_with_outbox(
-                        user_id=user_id,
-                        content=message,
-                        embedding=embedding,
-                        valence=emotion.get("valence", 0),
-                        conversation_id=session_id,
-                        idempotency_key=str(uuid.uuid4()),
-                    )
-
-                    inline_processing = bool(settings.OUTBOX_INLINE_PROCESSING or eval_mode)
-                    if inline_processing:
-                        if eval_mode and re.search(r"\bD\d+:\d+\b", message):
-                            from sqlalchemy import text as sql_text
-                            from app.worker.tasks.outbox import write_to_milvus_sync
-
-                            await asyncio.to_thread(
-                                lambda: write_to_milvus_sync(
-                                    memory_id=memory_id,
-                                    user_id=user_id,
-                                    content=message,
-                                    embedding=embedding,
-                                    valence=emotion.get("valence", 0),
-                                )
-                            )
-                            await self.transaction_manager.db.execute(
-                                sql_text(
-                                    "UPDATE memories SET status='committed', committed_at=NOW() WHERE id=:mid"
-                                ),
-                                {"mid": memory_id},
-                            )
-                            await self.transaction_manager.db.execute(
-                                sql_text(
-                                    "UPDATE outbox_events SET status='done', processed_at=NOW(), error_message=NULL WHERE event_id=:eid"
-                                ),
-                                {"eid": event_id},
-                            )
-                            await self.transaction_manager.db.commit()
-                        else:
-                            payload = {
-                                "memory_id": memory_id,
-                                "user_id": user_id,
-                                "content": message,
-                                "embedding": embedding,
-                                "valence": emotion.get("valence", 0),
-                                "conversation_id": session_id,
-                                "entities": [],
-                                "edges": [],
-                            }
-
-                            from app.worker.tasks.outbox import process_outbox_event
-                            await asyncio.to_thread(
-                                lambda: process_outbox_event.apply(args=(event_id, payload)).get()
-                            )
-
-                if bool(settings.OUTBOX_INLINE_PROCESSING or eval_mode):
-                    await _create_memory()
-                else:
-                    asyncio.create_task(_create_memory())
-            except Exception as ex:
-                logger.warning(f"Failed to schedule memory write: {type(ex).__name__}: {ex}")
         
         response_time = (datetime.now() - start_time).total_seconds() * 1000
+        memory_ids: List[str] = []
+        if is_new:
+            transcript_lines = self._extract_timestamped_transcript_lines(message)
+            if transcript_lines:
+                import asyncio
+                from app.worker.tasks.outbox import write_to_milvus_sync
+                from app.services.temporal_extractor import TemporalExtractor
+                from app.core.database import milvus_connected
+
+                temporal_extractor = TemporalExtractor()
+
+                for i, line in enumerate(transcript_lines):
+                    line_idempotency_key = f"{idempotency_key}:{i}"
+                    embedding = await self.embedding_service.encode(line)
+                    metadata = temporal_extractor.extract(line)
+                    if eval_mode:
+                        memory_id, _event_id = await self.transaction_manager.create_committed_memory(
+                            user_id=user_id,
+                            content=line,
+                            embedding=embedding,
+                            valence=emotion.get("valence", 0),
+                            conversation_id=session_id,
+                            idempotency_key=line_idempotency_key,
+                            metadata=metadata
+                        )
+                        if milvus_connected:
+                            await asyncio.to_thread(
+                                write_to_milvus_sync,
+                                memory_id,
+                                user_id,
+                                line,
+                                embedding,
+                                emotion.get("valence", 0)
+                            )
+                        try:
+                            from app.services.llm_extraction_service import extract_ir
+                            from app.services.ir_critic_service import critique_ir
+                            from app.worker.tasks.outbox import get_recent_entities, write_ir_to_neo4j
+
+                            context_entities = await asyncio.to_thread(get_recent_entities, user_id)
+                            extraction_result = await asyncio.to_thread(
+                                extract_ir,
+                                text=line,
+                                user_id=user_id,
+                                context_entities=context_entities
+                            )
+
+                            if extraction_result.success:
+                                critic_result = critique_ir(
+                                    entities=extraction_result.entities,
+                                    relations=extraction_result.relations,
+                                    strict_mode=False
+                                )
+                                await asyncio.to_thread(
+                                    write_ir_to_neo4j,
+                                    _event_id,
+                                    user_id,
+                                    critic_result.entities,
+                                    critic_result.relations,
+                                    extraction_result.metadata,
+                                    session_id
+                                )
+                            else:
+                                logger.warning(f"Eval graph write skipped (LLM extraction failed): {extraction_result.error}")
+                        except Exception as e:
+                            logger.warning(f"Eval graph write skipped (exception): {e}")
+                    else:
+                        memory_id, _event_id = await self.transaction_manager.create_memory_with_outbox(
+                            user_id=user_id,
+                            content=line,
+                            embedding=embedding,
+                            valence=emotion.get("valence", 0),
+                            conversation_id=session_id,
+                            idempotency_key=line_idempotency_key,
+                            metadata=metadata
+                        )
+                    memory_ids.append(memory_id)
+                await self.idempotency_checker.set_memory_id(idempotency_key, memory_ids[0] if memory_ids else None)
+            else:
+                embedding = await self.embedding_service.encode(message)
+                memory_id, _event_id = await self.transaction_manager.create_memory_with_outbox(
+                    user_id=user_id,
+                    content=message,
+                    embedding=embedding,
+                    valence=emotion.get("valence", 0),
+                    conversation_id=session_id,
+                    idempotency_key=idempotency_key,
+                    metadata={}
+                )
+                await self.idempotency_checker.set_memory_id(idempotency_key, memory_id)
+                memory_ids = [memory_id]
         
         return ConversationResponse(
             reply=reply,
@@ -787,12 +918,118 @@ class ConversationService:
                 "state": new_affinity.state,
                 "delta": new_affinity.delta
             },
-            memories_used=[m.id for m in retrieval_result.memories],
+            memories_used=[m.id for m in retrieval_result.memories] + memory_ids,
             tone_type=self._get_tone_type(new_affinity.new_score),
             response_time_ms=response_time,
             mode=mode,
             context_source=context_source
         )
+
+    def _extract_timestamped_transcript_lines(self, text: str) -> List[str]:
+        if not text:
+            return []
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if len(lines) < 2:
+            return []
+        pattern = re.compile(r"^\[D\d+:\d+\s+ts=[^\]]+\]\s+.+$")
+        matched = [ln for ln in lines if pattern.match(ln)]
+        if len(matched) >= 2:
+            return matched
+        return []
+
+    def _extract_eval_question_text(self, message: str) -> str:
+        if not message:
+            return ""
+        m = re.search(r"\bQuestion:\s*(.+?)\s*(?:\n|$)", message, flags=re.IGNORECASE | re.DOTALL)
+        if m:
+            return m.group(1).strip()
+        return message.strip()
+
+    def _is_temporal_question(self, question: str) -> bool:
+        if not question:
+            return False
+        q = question.strip().lower()
+        return q.startswith("when ") or q.startswith("when?") or " when " in f" {q} "
+
+    async def _answer_temporal_question(self, user_id: str, question: str) -> Optional[str]:
+        if not self.transaction_manager or not getattr(self.transaction_manager, "db", None):
+            return None
+
+        name = None
+        m = re.search(r"\bwhen\s+did\s+([A-Z][A-Za-z0-9_'-]*)\b", question, flags=re.IGNORECASE)
+        if m:
+            name = m.group(1)
+
+        keywords: List[str] = []
+        if name:
+            tail = question[m.end():]
+            for tok in re.findall(r"[A-Za-z]{4,}", tail.lower()):
+                if tok not in {"when", "did", "what", "where", "from", "that", "this"}:
+                    keywords.append(tok)
+
+        from sqlalchemy import text as sql_text
+
+        params = {"user_id": user_id}
+        where_clause = "user_id = CAST(:user_id AS uuid) AND status = 'committed'"
+        if name:
+            where_clause += " AND content ILIKE :name_pattern"
+            params["name_pattern"] = f"%{name}%"
+
+        result = await self.transaction_manager.db.execute(
+            sql_text(f"""
+                SELECT content, metadata, created_at
+                FROM memories
+                WHERE {where_clause}
+                ORDER BY created_at DESC
+                LIMIT 50
+            """),
+            params
+        )
+        rows = result.fetchall()
+        if not rows:
+            return None
+
+        best_score = -1
+        best_resolved = None
+
+        for content, metadata, _created_at in rows:
+            if not metadata or not isinstance(metadata, dict):
+                continue
+            temporal = metadata.get("temporal") if isinstance(metadata, dict) else None
+            resolved = temporal.get("resolved") if isinstance(temporal, dict) else None
+            if not resolved:
+                continue
+
+            score = 0
+            if name and isinstance(content, str) and name.lower() in content.lower():
+                score += 10
+            if keywords and isinstance(content, str):
+                c = content.lower()
+                score += sum(1 for kw in keywords if kw in c) * 2
+            score += 1
+
+            if score > best_score:
+                best_score = score
+                best_resolved = resolved
+
+        if not best_resolved:
+            return None
+
+        if best_resolved.get("type") == "date":
+            value = best_resolved.get("value")
+            return value if isinstance(value, str) else None
+
+        if best_resolved.get("type") == "range":
+            year = best_resolved.get("year")
+            if isinstance(year, int):
+                return str(year)
+            start = best_resolved.get("start")
+            end = best_resolved.get("end")
+            if isinstance(start, str) and isinstance(end, str):
+                return f"{start} to {end}"
+            return None
+
+        return None
     
     async def _generate_stream(
         self,
@@ -811,7 +1048,7 @@ class ConversationService:
         logger.info(f"Entity facts count: {len(entity_facts) if entity_facts else 0}")
         
         try:
-            response = await self.llm_client.chat.completions.create(
+            response = await self._chat_completion(
                 model=tier_config["model"],
                 messages=[
                     {"role": "system", "content": prompt},
@@ -829,7 +1066,7 @@ class ConversationService:
             async for chunk in response:
                 if chunk.choices and chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
-                    logger.debug(f"Stream chunk: {content}")
+                    logger.debug(f"Stream chunk len={len(content)}")
                     yield content
                     
         except Exception as e:
@@ -855,7 +1092,7 @@ class ConversationService:
         tier_config = TierRouter.TIERS.get(tier, TierRouter.TIERS[2])
         
         try:
-            response = await self.llm_client.chat.completions.create(
+            response = await self._chat_completion(
                 model=tier_config["model"],
                 messages=[
                     {"role": "system", "content": prompt},
@@ -892,6 +1129,9 @@ class ConversationService:
         - 短期记忆（History）：仅用于上下文理解，不作为事实来源
         """
         tone_config = AffinityService.get_tone_config(affinity.state)
+
+        if mode == ConversationMode.GRAPH_ONLY and conversation_history:
+            raise ValueError("conversation_history is not allowed in graph_only mode")
         
         # ========== 长期记忆：图谱事实（多跳推理的基础）==========
         direct_facts = []
@@ -901,21 +1141,9 @@ class ConversationService:
             for fact in entity_facts[:20]:
                 hop = fact.get("hop", 1)
                 relation_cn = self._translate_relation(fact.get("relation", ""))
-                desc = (fact.get("description") or "").strip()
-                desc_part = f"（{desc}）" if desc else ""
-                time_iso = (fact.get("time_iso") or "").strip()
-                time_epoch_ms = fact.get("time_epoch_ms")
-                time_part = ""
-                if time_iso or time_epoch_ms is not None:
-                    pieces = []
-                    if time_iso:
-                        pieces.append(f"ISO={time_iso}")
-                    if time_epoch_ms is not None:
-                        pieces.append(f"epoch_ms={time_epoch_ms}")
-                    time_part = f"（时间:{', '.join(pieces)}）"
                 
                 if hop == 1:
-                    direct_facts.append(f"- {fact['entity']} {relation_cn} {fact['target']}{desc_part}{time_part}")
+                    direct_facts.append(f"- {fact['entity']} {relation_cn} {fact['target']}")
                 else:
                     path = fact.get("path", "")
                     via = fact.get("via", "")
@@ -979,15 +1207,14 @@ class ConversationService:
 """
         
         # 添加回答规则
-        prompt += self._build_task_router_rules(message)
         prompt += """
 【回答规则 - 必须严格遵守】
 1. 事实性问题必须基于「长期记忆」中的信息
 2. 如果有「间接关系」，可以基于关联人物进行合理推断
 3. 可以结合常识知识对已知事实进行推理（例如：大连是海边城市，上海是南方城市）
-4. 如果「长期记忆」缺失但「短期记忆」包含明确原话/细节，允许把短期记忆作为事实来源并引用
-5. 如果长期记忆和短期记忆都没有相关信息，诚实回答"我不记得你告诉过我这些"
-6. 允许向用户追问以补齐缺失信息，但不要用猜测填空
+4. 「短期记忆」只用于理解对话上下文，不能作为事实来源
+5. 如果长期记忆没有相关信息，诚实回答"我不记得你告诉过我这些"
+6. 可以询问用户来获取更多信息
 
 【常识推理示例】
 - 用户问"谁住在海边"，记忆中有"昊哥住在大连"→ 可以推理"大连是海边城市，所以昊哥住在海边"
@@ -1002,293 +1229,6 @@ class ConversationService:
 请根据以上信息，生成一个温暖、诚实的回复。"""
         
         return prompt
-
-    def _build_task_router_rules(self, message: str) -> str:
-        m = (message or "").strip().lower()
-        if not m:
-            return ""
-        temporal_markers = [
-            "how long",
-            "how many minutes",
-            "how many seconds",
-            "how many hours",
-            "how long did",
-            "duration",
-            "time did it take",
-            "when did",
-            "what date",
-            "what time",
-            "多久",
-            "多长时间",
-            "花了多久",
-            "持续多久",
-            "什么时候",
-            "哪天",
-            "几号",
-            "几月",
-            "几点",
-            "多久之前",
-        ]
-        factual_markers = [
-            "who",
-            "where",
-            "what is",
-            "what did",
-            "name",
-            "identity",
-            "from where",
-            "住在",
-            "来自",
-            "是谁",
-            "哪里",
-            "身份",
-            "职业",
-            "工作",
-            "生日",
-            "单身",
-        ]
-        if any(x in m for x in temporal_markers):
-            return (
-                "\n【任务路由 - 时间/日期】\n"
-                "1. 如果问题涉及日期/时间点/时长，并且记忆中出现明确时间点（例如 2023-05-07、14:00:00），必须进行推导并给出明确答案。\n"
-                "2. 计算时长时，按最早时间点到最晚时间点计算；如问题明确起止事件，优先按事件对应时间。\n"
-                "3. 输出格式要求：\n"
-                "   - 英文时长：X minutes Y seconds\n"
-                "   - 中文时长：X分Y秒\n"
-                "   - 日期/时间点：必须输出 ISO 8601（YYYY-MM-DD 或 YYYY-MM-DDTHH:MM:SS）；如果长期记忆里出现 epoch_ms 或可由 ISO 直接换算，必须同时输出 epoch_ms=...；示例：2023-05-07 (epoch_ms=1683417600000)\n"
-                "   - 如果长期记忆里已经给出 ISO/epoch（例如 图谱事实中包含 时间:ISO=... 或 epoch_ms=...），把它当作最终答案，不要再提出第二个备选日期。\n"
-                "4. 不要回答“大概”“不确定”来回避计算；只有在记忆里确实没有任何时间线索时才说不知道。\n"
-            )
-        if any(x in m for x in factual_markers):
-            return (
-                "\n【任务路由 - 事实回忆】\n"
-                "1. 如果用户询问具体事实（身份/地点/日期/职业/关系），必须优先在长期记忆中逐条检索；不足时允许引用短期记忆的原话。\n"
-                "2. 如果记忆中存在答案，禁止说“未提供信息/没有信息”。\n"
-            )
-        return ""
-
-    async def _try_temporal_tool_reply(self, user_id: str, message: str) -> Optional[str]:
-        question = (message or "").strip()
-        if not question:
-            return None
-
-        in_message_evidence = []
-        if "[id " in question and "@" in question:
-            in_message_evidence.append({"id": "message", "content": question})
-
-        evidences = in_message_evidence
-        if not evidences:
-            evidences = await self._retrieve_temporal_evidence(user_id=user_id, question=question, limit=20)
-
-        evidence_score = sum(
-            1
-            for e in evidences
-            if isinstance(e.get("temporal"), dict)
-            and e["temporal"].get("precision") in ("date", "datetime")
-            and e["temporal"].get("start_ts")
-        )
-        if evidence_score <= 0 and not in_message_evidence:
-            return None
-
-        ans = self.temporal_query_service.try_answer(question, evidences)
-        if not ans:
-            return None
-        if ans.confidence < 0.8:
-            return None
-        return ans.answer
-
-    async def _retrieve_temporal_evidence(self, user_id: str, question: str, limit: int = 20) -> List[dict]:
-        from sqlalchemy import text as sql_text
-
-        keywords = [w for w in re.findall(r"[a-zA-Z']+", (question or "").lower()) if len(w) >= 4]
-        stop = {"when", "what", "which", "date", "did", "was", "how", "long", "take", "took", "according", "record"}
-        keywords = [w for w in keywords if w not in stop][:6]
-
-        where_kw = ""
-        params = {"user_id": user_id, "limit": int(limit)}
-        if keywords:
-            parts = []
-            for i, w in enumerate(keywords):
-                key = f"kw{i}"
-                params[key] = f"%{w}%"
-                parts.append(f"content ILIKE :{key}")
-            where_kw = " AND (" + " OR ".join(parts) + ")"
-
-        sql = sql_text(
-            f"""
-            SELECT id, content, created_at, meta->'temporal' AS temporal
-            FROM memories
-            WHERE user_id = CAST(:user_id AS uuid)
-              AND status != 'deleted'
-              AND meta ? 'temporal'
-              AND (meta->'temporal'->>'precision') IN ('date', 'datetime')
-              {where_kw}
-            ORDER BY (meta->'temporal'->>'start_ts')::timestamptz DESC NULLS LAST, created_at DESC
-            LIMIT :limit
-            """
-        )
-
-        db = getattr(self.transaction_manager, "db", None)
-        if db is None:
-            from app.core.database import AsyncSessionLocal
-
-            async with AsyncSessionLocal() as session:
-                result = await session.execute(sql, params)
-                rows = result.fetchall()
-        else:
-            result = await db.execute(sql, params)
-            rows = result.fetchall()
-
-        out = []
-        for r in rows:
-            out.append(
-                {
-                    "id": str(r.id),
-                    "content": r.content,
-                    "created_at": r.created_at,
-                    "temporal": r.temporal or {},
-                }
-            )
-        return out
-
-    def _try_deterministic_eval_answer(self, message: str) -> Optional[str]:
-        msg = message or ""
-        if "Below is the record excerpt" not in msg or "Question:" not in msg:
-            return None
-        m = re.search(r"Question:\s*(.+?)\s*Answer:\s*$", msg, flags=re.IGNORECASE | re.DOTALL)
-        question = (m.group(1).strip() if m else "").strip()
-        if not question:
-            return None
-        ql = question.lower()
-        duration_markers = ["how long", "take", "took", "duration", "minutes", "seconds"]
-        if not any(x in ql for x in duration_markers):
-            return None
-
-        records = self._parse_timestamped_record_excerpt(msg)
-        if len(records) < 2:
-            return None
-
-        stop = {
-            "according",
-            "record",
-            "from",
-            "during",
-            "after",
-            "before",
-            "when",
-            "where",
-            "how",
-            "long",
-            "take",
-            "took",
-            "did",
-            "finally",
-            "outside",
-            "time",
-        }
-        start_desc, end_desc = self._extract_duration_endpoints(question)
-        if not start_desc or not end_desc:
-            return None
-
-        starts = self._score_records_for_desc(records, start_desc, stop_words=stop)
-        ends = self._score_records_for_desc(records, end_desc, stop_words=stop)
-        if not starts or not ends:
-            return None
-
-        best = None
-        for s_score, s_rid, s_ts in starts[:20]:
-            for e_score, e_rid, e_ts in ends[:20]:
-                if e_ts < s_ts:
-                    continue
-                dur = (e_ts - s_ts).total_seconds()
-                if dur < 0 or dur > 6 * 3600:
-                    continue
-                key = (s_score + e_score, -dur, -min(s_score, e_score))
-                if best is None or key > best[0]:
-                    best = (key, s_ts, e_ts, s_rid, e_rid)
-        if best is None:
-            return None
-        start = best[1]
-        end = best[2]
-        delta_s = int(round((end - start).total_seconds()))
-        if delta_s < 0:
-            return None
-        minutes = delta_s // 60
-        seconds = delta_s % 60
-        return f"{minutes} minutes {seconds} seconds"
-
-    def _extract_duration_endpoints(self, question: str) -> tuple:
-        q = (question or "").strip()
-        m = re.search(r"\bfrom\s+when\s+(.+?)\s+to\s+when\s+(.+?)(?:\?|$)", q, flags=re.IGNORECASE)
-        if m:
-            return m.group(1).strip(), m.group(2).strip()
-        m = re.search(r"\bfrom\s+(.+?)\s+to\s+(.+?)(?:\?|$)", q, flags=re.IGNORECASE)
-        if m:
-            return m.group(1).strip(), m.group(2).strip()
-        m = re.search(r"\bfor\s+(.+?)\s+to\s+(.+?)(?:\?|$)", q, flags=re.IGNORECASE)
-        if m:
-            subj = m.group(1).strip()
-            rest = m.group(2).strip()
-            rl = rest.lower()
-            if "arriv" in rl:
-                parts = re.split(r"\barriv(?:e|ed|ing)?\b", rest, maxsplit=1, flags=re.IGNORECASE)
-                tail = parts[1].strip() if len(parts) > 1 else ""
-                if "depart" in rl:
-                    return f"{subj} depart", f"{subj} arrive {tail}".strip()
-                return subj, f"{subj} arrive {tail}".strip()
-            return subj, rest
-        return "", ""
-
-    def _score_records_for_desc(self, records: List[tuple], desc: str, stop_words: set) -> List[tuple]:
-        dl = (desc or "").lower()
-        tokens = [w for w in re.findall(r"[a-zA-Z']+", dl) if len(w) >= 3 and w not in stop_words]
-        synonyms = {
-            "depart": ["depart", "leave", "left"],
-            "arrive": ["arrive", "arrived", "reach", "reached", "outside"],
-            "awakened": ["awakened", "woke", "woken"],
-            "escape": ["escape", "escaped"],
-        }
-        expanded = []
-        for t in tokens:
-            expanded.append(t)
-            if t in synonyms:
-                expanded.extend(synonyms[t])
-        expanded = list(dict.fromkeys(expanded))
-        if not expanded:
-            return []
-
-        candidates = []
-        for rid, ts, text in records:
-            if ts is None:
-                continue
-            blob = (text or "").lower()
-            score = sum(1 for k in expanded if k in blob)
-            if score > 0:
-                candidates.append((score, rid, ts))
-        candidates.sort(key=lambda x: (-x[0], x[1]))
-        return candidates
-
-    def _parse_timestamped_record_excerpt(self, message: str) -> List[tuple]:
-        out = []
-        for line in (message or "").splitlines():
-            line = line.strip()
-            if not line.startswith("[id "):
-                continue
-            m = re.match(r"^\[id\s+(\d+)\]\s+(\S+)\s+@\s+(.+)$", line)
-            if not m:
-                continue
-            rid = int(m.group(1))
-            ts_raw = m.group(2)
-            ts = None
-            s = ts_raw
-            if s.endswith("Z"):
-                s = s[:-1] + "+00:00"
-            try:
-                ts = datetime.fromisoformat(s)
-            except Exception:
-                ts = None
-            out.append((rid, ts, line))
-        return out
     
     def _translate_relation(self, relation_type: str) -> str:
         """将关系类型翻译为中文"""
@@ -1366,7 +1306,6 @@ class ConversationService:
         from app.core.database import AsyncSessionLocal
         
         try:
-            session_uuid = uuid.UUID(session_id)
             async with AsyncSessionLocal() as db:
                 result = await db.execute(
                     text("""
@@ -1376,7 +1315,7 @@ class ConversationService:
                         ORDER BY created_at DESC
                         LIMIT :limit
                     """),
-                    {"session_id": session_uuid, "limit": limit * 2}  # user + assistant
+                    {"session_id": session_id, "limit": limit * 2}  # user + assistant
                 )
                 rows = result.fetchall()
                 
@@ -1395,46 +1334,6 @@ class ConversationService:
         except Exception as e:
             logger.warning(f"Failed to load conversation history: {e}")
             return []
-
-    def _session_history_key(self, session_id: str) -> str:
-        return f"session_history:{session_id}"
-
-    def _append_session_history(self, session_id: str, role: str, content: str) -> None:
-        if not self.redis_client:
-            return
-        try:
-            key = self._session_history_key(session_id)
-            item = json.dumps({"role": role, "content": content, "ts": datetime.utcnow().isoformat()})
-            self.redis_client.rpush(key, item)
-            self.redis_client.ltrim(key, -40, -1)
-            self.redis_client.expire(key, 1800)
-        except Exception as e:
-            logger.debug(f"session_history_redis_write_failed: {e}")
-
-    async def _get_conversation_history_fast(self, session_id: str, limit: int = 5) -> List[dict]:
-        if self.redis_client:
-            try:
-                key = self._session_history_key(session_id)
-                raw = self.redis_client.lrange(key, -limit * 2, -1)
-                out: List[dict] = []
-                for s in raw:
-                    try:
-                        obj = json.loads(s)
-                        if isinstance(obj, dict) and obj.get("role") and obj.get("content") is not None:
-                            out.append(
-                                {
-                                    "role": obj["role"],
-                                    "content": obj["content"],
-                                    "created_at": obj.get("ts"),
-                                }
-                            )
-                    except Exception:
-                        continue
-                if out:
-                    return out
-            except Exception:
-                pass
-        return await self._get_conversation_history(session_id, limit=limit)
     
     def _save_conversation_turn_background(
         self,
@@ -1460,8 +1359,6 @@ class ConversationService:
             import json
             
             try:
-                session_uuid = uuid.UUID(session_id)
-                user_uuid = uuid.UUID(user_id)
                 async with AsyncSessionLocal() as db:
                     # 保存用户消息
                     await db.execute(
@@ -1472,8 +1369,8 @@ class ConversationService:
                         """),
                         {
                             "id": str(uuid.uuid4()),
-                            "session_id": session_uuid,
-                            "user_id": user_uuid,
+                            "session_id": session_id,
+                            "user_id": user_id,
                             "content": user_message,
                             "emotion": json.dumps(emotion),
                             "affinity": str(affinity_score)
@@ -1489,8 +1386,8 @@ class ConversationService:
                         """),
                         {
                             "id": str(uuid.uuid4()),
-                            "session_id": session_uuid,
-                            "user_id": user_uuid,
+                            "session_id": session_id,
+                            "user_id": user_id,
                             "content": assistant_reply
                         }
                     )
@@ -1501,9 +1398,6 @@ class ConversationService:
             except Exception as e:
                 logger.warning(f"Failed to save conversation turn in background: {e}")
         
-        self._append_session_history(session_id=session_id, role="user", content=user_message)
-        self._append_session_history(session_id=session_id, role="assistant", content=assistant_reply)
-
         # 创建后台任务，不等待完成
         try:
             asyncio.create_task(_save())

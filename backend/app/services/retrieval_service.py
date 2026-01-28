@@ -1,4 +1,5 @@
 """混合检索服务 - Vector + Graph + Entity Facts"""
+import asyncio
 import math
 import logging
 import json
@@ -7,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from openai import AsyncOpenAI
 from app.core.config import settings
+from circuitbreaker import circuit
 
 logger = logging.getLogger(__name__)
 
@@ -102,27 +104,31 @@ class EmbeddingService:
                 logger.debug(f"Embedding cache hit, time: {elapsed:.2f}ms")
                 return cached
         
-        # 调用 API
-        try:
-            response = await self.client.embeddings.create(
-                input=text,
-                model=self.model_name
-            )
-            embedding = response.data[0].embedding
-            
-            # 缓存结果
-            if use_cache:
-                await self._cache_embedding(text, embedding)
-            
-            elapsed = (datetime.now() - start_time).total_seconds() * 1000
-            logger.debug(f"Embedding computed, time: {elapsed:.2f}ms")
-            
-            return embedding
-            
-        except Exception as e:
-            logger.error(f"Cloud embedding failed: {e}")
-            # 返回零向量作为 fallback (1024维是 bge-m3 的输出维度)
-            return [0.0] * 1024
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = await self.client.embeddings.create(
+                    input=text,
+                    model=self.model_name,
+                    timeout=float(settings.EMBEDDING_REQUEST_TIMEOUT_S),
+                )
+                embedding = response.data[0].embedding
+
+                if use_cache:
+                    await self._cache_embedding(text, embedding)
+
+                elapsed = (datetime.now() - start_time).total_seconds() * 1000
+                logger.debug(f"Embedding computed, time: {elapsed:.2f}ms")
+
+                return embedding
+            except Exception as e:
+                last_error = e
+                if attempt >= 2:
+                    break
+                await asyncio.sleep(0.5 * (attempt + 1))
+
+        logger.error(f"Cloud embedding failed: {last_error}")
+        return [0.0] * 1024
     
     async def _get_cached_embedding(self, text: str) -> Optional[List[float]]:
         """从缓存获取 embedding"""
@@ -300,8 +306,14 @@ class RetrievalService:
         """
         start_time = datetime.now()
         
-        # Step 1: Vector Search (Milvus)
-        vector_candidates = await self._vector_search(user_id, query, top_k=50)
+        query_embedding = await self.embedding_service.encode(query)
+        
+        # Step 1: Vector Search (Milvus -> Postgres -> Recent)
+        vector_candidates = await self._vector_search(user_id, query, query_embedding=query_embedding, top_k=50)
+        if not vector_candidates:
+            vector_candidates = await self._pg_vector_search(user_id, query_embedding=query_embedding, top_k=50)
+        if not vector_candidates:
+            vector_candidates = await self._recent_memories_search(user_id, limit=50)
         
         # Step 2: Graph Expansion (Neo4j)
         graph_expanded = await self._graph_expand(vector_candidates, user_id)
@@ -327,11 +339,13 @@ class RetrievalService:
         self,
         user_id: str,
         query: str,
+        query_embedding: List[float] | None = None,
         top_k: int = 50
     ) -> List[Memory]:
         """向量检索"""
         # 1. 编码查询文本
-        query_embedding = await self.embedding_service.encode(query)
+        if query_embedding is None:
+            query_embedding = await self.embedding_service.encode(query)
         
         if not self.milvus:
             logger.warning("Milvus client not initialized, returning empty results")
@@ -399,6 +413,94 @@ class RetrievalService:
             
         except Exception as e:
             logger.error(f"Vector search failed: {e}")
+            return []
+
+    async def _pg_vector_search(
+        self,
+        user_id: str,
+        query_embedding: List[float],
+        top_k: int = 50
+    ) -> List[Memory]:
+        if not self.db:
+            return []
+
+        try:
+            from sqlalchemy import text
+            if len(query_embedding) < 1024:
+                query_embedding = query_embedding + [0.0] * (1024 - len(query_embedding))
+            elif len(query_embedding) > 1024:
+                query_embedding = query_embedding[:1024]
+            embedding_str = str(query_embedding)
+            result = await self.db.execute(
+                text("""
+                    SELECT
+                        id::text,
+                        content,
+                        valence,
+                        created_at,
+                        1 - (embedding <=> :query_embedding) AS score
+                    FROM memories
+                    WHERE user_id = :user_id
+                      AND status = 'committed'
+                      AND embedding IS NOT NULL
+                    ORDER BY embedding <=> :query_embedding
+                    LIMIT :top_k
+                """),
+                {"user_id": user_id, "query_embedding": embedding_str, "top_k": top_k}
+            )
+
+            memories = []
+            for row in result.fetchall():
+                created_at = row[3] if isinstance(row[3], datetime) else datetime.now()
+                cosine_sim = float(row[4]) if row[4] is not None else 0.0
+                memories.append(Memory(
+                    id=row[0],
+                    content=row[1] or "",
+                    cosine_sim=max(0.0, cosine_sim),
+                    valence=row[2] or 0.0,
+                    created_at=created_at,
+                    recency_score=self._calculate_recency(created_at)
+                ))
+            if memories:
+                logger.info(f"PG vector search returned {len(memories)} candidates")
+            return memories
+        except Exception as e:
+            logger.warning(f"PG vector search failed: {e}")
+            return []
+
+    async def _recent_memories_search(self, user_id: str, limit: int = 50) -> List[Memory]:
+        if not self.db:
+            return []
+
+        try:
+            from sqlalchemy import text
+            result = await self.db.execute(
+                text("""
+                    SELECT id::text, content, valence, created_at
+                    FROM memories
+                    WHERE user_id = :user_id
+                      AND status = 'committed'
+                    ORDER BY created_at DESC
+                    LIMIT :limit
+                """),
+                {"user_id": user_id, "limit": limit}
+            )
+            memories = []
+            for row in result.fetchall():
+                created_at = row[3] if isinstance(row[3], datetime) else datetime.now()
+                memories.append(Memory(
+                    id=row[0],
+                    content=row[1] or "",
+                    cosine_sim=0.0,
+                    valence=row[2] or 0.0,
+                    created_at=created_at,
+                    recency_score=self._calculate_recency(created_at)
+                ))
+            if memories:
+                logger.info(f"Recent memories fallback returned {len(memories)} candidates")
+            return memories
+        except Exception as e:
+            logger.warning(f"Recent memories fallback failed: {e}")
             return []
     
     async def _graph_expand(
@@ -623,16 +725,15 @@ class RetrievalService:
             neo4j_driver: Neo4j 驱动
             max_hops: 最大跳数 (默认 3)
         """
-        logger.info(f"retrieve_entity_facts: query={query}, user={user_id}, max_hops={max_hops}")
+        logger.info(f"retrieve_entity_facts: query_len={len(query) if query else 0}, user_id_prefix={str(user_id)[:8]}, max_hops={max_hops}")
         
         # Step 1: 从 query 中提取实体名称
         entity_names = await self._extract_query_entities(query)
         
         if not entity_names:
-            logger.info(f"No entities extracted from query")
+            logger.info("No entities extracted from query")
             return []
-        
-        logger.info(f"Extracted entities: {entity_names}")
+        logger.info(f"Extracted entities count: {len(entity_names)}")
         
         # Step 2 & 3: 查询 Neo4j 获取实体的所有关系
         driver = neo4j_driver or self.graph
@@ -658,8 +759,7 @@ class RetrievalService:
                     # 查找实体节点（模糊匹配名称）
                     find_entity_query = """
                     MATCH (e {user_id: $user_id})
-                    WHERE toLower(e.name) CONTAINS toLower($entity_name) 
-                       OR toLower($entity_name) CONTAINS toLower(e.name)
+                    WHERE e.name CONTAINS $entity_name OR $entity_name CONTAINS e.name
                     RETURN e.id AS entity_id, e.name AS entity_name, labels(e) AS labels
                     LIMIT 5
                     """
@@ -694,7 +794,6 @@ class RetrievalService:
                         WHERE NOT target:User
                         RETURN e.name AS source_name, type(r) AS relation_type, 
                                target.name AS target_name, r.desc AS description,
-                               r.time_iso AS time_iso, r.time_epoch_ms AS time_epoch_ms,
                                coalesce(r.weight, 0.5) AS weight,
                                1 AS hop_distance
                         """
@@ -710,8 +809,6 @@ class RetrievalService:
                                 "relation": rec["relation_type"],
                                 "target": rec["target_name"],
                                 "description": rec["description"],
-                                "time_iso": rec.get("time_iso"),
-                                "time_epoch_ms": rec.get("time_epoch_ms"),
                                 "weight": rec["weight"],
                                 "hop": 1,
                                 "path_type": "direct"
@@ -723,7 +820,6 @@ class RetrievalService:
                         WHERE NOT source:User
                         RETURN source.name AS source_name, type(r) AS relation_type,
                                e.name AS target_name, r.desc AS description,
-                               r.time_iso AS time_iso, r.time_epoch_ms AS time_epoch_ms,
                                coalesce(r.weight, 0.5) AS weight,
                                1 AS hop_distance
                         """
@@ -739,8 +835,6 @@ class RetrievalService:
                                 "relation": rec["relation_type"],
                                 "target": rec["target_name"],
                                 "description": rec["description"],
-                                "time_iso": rec.get("time_iso"),
-                                "time_epoch_ms": rec.get("time_epoch_ms"),
                                 "weight": rec["weight"],
                                 "hop": 1,
                                 "path_type": "direct"
@@ -1012,40 +1106,40 @@ class RetrievalService:
         """
         try:
             # 使用轻量级 prompt 提取实体，支持语义概念
-            response = await self.embedding_service.client.chat.completions.create(
-                model="deepseek-ai/DeepSeek-V3",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """You are an entity recognizer. Extract entity names mentioned in the user's question.
+            @circuit(failure_threshold=5, recovery_timeout=60)
+            async def _call_llm():
+                return await self.embedding_service.client.chat.completions.create(
+                    model=settings.OPENAI_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": """你是一个实体识别器。从用户的问题中提取被询问的实体名称。
 
-Rules:
-1) Support both Chinese and English questions.
-2) Extract explicitly mentioned entities: people, locations, organizations, things, events.
-3) Return a JSON array of strings, e.g. ["Caroline", "Melanie"] or ["昊哥", "大连"].
-4) If no clear entity, return [].
-5) Do not invent entities not present in the question.
-6) For concept queries (e.g., "海边", "南方", "camping"), include the concept keyword.
+规则：
+1. 提取问题中明确提到的人名、地名、事物名
+2. 返回 JSON 数组格式，如 ["二丫", "足球"]
+3. 如果没有明确实体，返回空数组 []
+4. 不要添加问题中没有的实体
+5. 对于语义概念查询（如"海边"、"南方"），也提取这些概念词
 
 示例：
 - "二丫喜欢什么" → ["二丫"]
 - "昊哥和二丫是什么关系" → ["昊哥", "二丫"]
 - "谁住在海边" → ["海边"]
 - "谁来自南方" → ["南方"]
-- "Who lives by the sea?" → ["by the sea"]
-- "When did Caroline go to the LGBTQ support group?" → ["Caroline", "LGBTQ support group"]
-- "How is the weather today?" → []
-- "Hello" → []"""
-                    },
-                    {
-                        "role": "user",
-                        "content": f"问题：{query}\n\n请提取实体名称（JSON数组）："
-                    }
-                ],
-                temperature=0.0,
-                max_tokens=120,
-                timeout=max(1.0, float(getattr(settings, "GRAPH_FACTS_TIMEOUT_S", 1.0))),
-            )
+- "今天天气怎么样" → []
+- "你好" → []"""
+                        },
+                        {
+                            "role": "user",
+                            "content": f"问题：{query}\n\n请提取实体名称（JSON数组）："
+                        }
+                    ],
+                    temperature=0.0,
+                    max_tokens=100
+                )
+
+            response = await _call_llm()
             
             content = response.choices[0].message.content.strip()
             
@@ -1078,28 +1172,4 @@ Rules:
             for pattern in patterns:
                 matches = re.findall(pattern, query)
                 entities.extend(matches)
-            en_candidates = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b", query)
-            en_stop = {
-                "When",
-                "What",
-                "Who",
-                "Where",
-                "Why",
-                "How",
-                "The",
-                "A",
-                "An",
-                "Is",
-                "Are",
-                "Was",
-                "Were",
-                "Do",
-                "Does",
-                "Did",
-                "I",
-                "You",
-                "We",
-                "They",
-            }
-            en_entities = [c.strip() for c in en_candidates if c.strip() and c.strip() not in en_stop]
-            return list(set(entities + en_entities))
+            return list(set(entities))

@@ -70,7 +70,7 @@ const KnowledgeGraph: React.FC<KnowledgeGraphProps> = ({ data, day }) => {
             'text-background-color': '#f3f4f6', // gray-100
             'text-background-opacity': 1,
             'text-background-padding': '2px',
-            'opacity': 'mapData(weight, 0, 1, 0.3, 1)' as any
+            'opacity': 'mapData(weight, 0, 1, 0.3, 1)' // 根据权重调整透明度
           }
         }
       ],

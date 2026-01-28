@@ -292,13 +292,15 @@ class RSSAggregatorService:
             days: 保留天数
             
         Returns:
-            删除的内容数量
+            归档的内容数量
         """
         try:
             result = await self.db.execute(
                 text("""
-                    DELETE FROM content_library
-                    WHERE published_at < NOW() - INTERVAL ':days days'
+                    UPDATE content_library
+                    SET is_active = FALSE
+                    WHERE published_at < NOW() - (:days || ' days')::interval
+                      AND is_active = TRUE
                     RETURNING id
                 """),
                 {"days": days}
@@ -307,7 +309,7 @@ class RSSAggregatorService:
             deleted_count = len(result.fetchall())
             await self.db.commit()
             
-            logger.info(f"Cleaned up {deleted_count} old contents (older than {days} days)")
+            logger.info(f"Archived {deleted_count} old contents (older than {days} days)")
             return deleted_count
             
         except Exception as e:

@@ -56,7 +56,7 @@ export interface AffinityPoint {
   timestamp: string; // ISO Date or formatted string like "Day 1"
   value: number; // 0-100
   event?: string; // Optional label for key events
-}
+  type: 'start' | 'text' | 'memory_pending' | 'done' | 'error';
 
 export interface UserState {
   isConnected: boolean;

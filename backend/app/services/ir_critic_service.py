@@ -88,8 +88,15 @@ def critique_ir(
         "filtered_duplicate_relations": 0,
     }
     
+    def canon_id(v: str) -> str:
+        return (v or "").strip().lower()
+
+    def canon_name(v: str) -> str:
+        return " ".join((v or "").strip().split()).lower()
+
     # ========== 实体校验 ==========
     seen_entity_ids = set()
+    seen_entity_names = set()
     
     for ent in entities:
         ent_id = ent.get("id", "")
@@ -97,12 +104,15 @@ def critique_ir(
         ent_type = ent.get("type", "Other")
         confidence = float(ent.get("confidence", 0.8))
         is_user = ent.get("is_user", False)
+
+        ent_id_c = canon_id(ent_id)
+        ent_name_c = canon_name(ent_name)
         
         # 用户节点始终保留
-        if is_user or ent_id == "user":
-            if ent_id not in seen_entity_ids:
+        if is_user or ent_id_c == "user":
+            if "user" not in seen_entity_ids:
                 valid_entities.append(ent)
-                seen_entity_ids.add(ent_id)
+                seen_entity_ids.add("user")
             continue
         
         # 1. 置信度过滤
@@ -125,8 +135,8 @@ def critique_ir(
             logger.debug(f"Filtered entity '{ent_name}': invalid type {ent_type}")
             continue
         
-        # 3. 重复检测
-        if ent_id in seen_entity_ids:
+        # 3. 重复检测（id/name 任一重复都丢弃）
+        if ent_id_c in seen_entity_ids or (ent_name_c and ent_name_c in seen_entity_names):
             stats["filtered_duplicate_entities"] += 1
             filtered_entities.append({
                 **ent,
@@ -145,7 +155,9 @@ def critique_ir(
             continue
         
         valid_entities.append(ent)
-        seen_entity_ids.add(ent_id)
+        seen_entity_ids.add(ent_id_c)
+        if ent_name_c:
+            seen_entity_names.add(ent_name_c)
     
     # ========== 关系校验 ==========
     seen_relations = set()
@@ -155,9 +167,12 @@ def critique_ir(
         target = rel.get("target", "")
         rel_type = rel.get("type", "RELATED_TO").upper()
         confidence = float(rel.get("confidence", 0.8))
+
+        source_c = canon_id(source)
+        target_c = canon_id(target)
         
         # 1. 自环检测
-        if source == target:
+        if source_c and source_c == target_c:
             stats["filtered_self_loop_relations"] += 1
             filtered_relations.append({
                 **rel,
@@ -187,7 +202,7 @@ def critique_ir(
             continue
         
         # 4. 源/目标存在性检查（必须在有效实体中）
-        if source != "user" and source not in seen_entity_ids:
+        if source_c != "user" and source_c not in seen_entity_ids:
             filtered_relations.append({
                 **rel,
                 "filter_reason": f"source_not_found ({source})"
@@ -195,7 +210,7 @@ def critique_ir(
             logger.debug(f"Filtered relation: source {source} not in valid entities")
             continue
         
-        if target not in seen_entity_ids:
+        if target_c not in seen_entity_ids:
             filtered_relations.append({
                 **rel,
                 "filter_reason": f"target_not_found ({target})"
@@ -204,7 +219,7 @@ def critique_ir(
             continue
         
         # 5. 重复检测（同源同目标同类型）
-        rel_key = (source, target, rel_type)
+        rel_key = (source_c, target_c, rel_type)
         if rel_key in seen_relations:
             stats["filtered_duplicate_relations"] += 1
             filtered_relations.append({

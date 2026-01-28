@@ -88,19 +88,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onMemoryUpdate }) => {
               memoryId: event.memory_id 
             } : msg
           ));
-        } else if (event.type === 'memory_committed') {
-          const committedId = event.memory_id || memoryPendingId;
-          if (committedId) {
-            memoryPendingId = committedId;
-          }
-          setMessages(prev => prev.map(msg =>
-            msg.id === aiMsgId ? {
-              ...msg,
-              memoryState: MemoryState.COMMITTED,
-              memoryId: committedId || msg.memoryId
-            } : msg
-          ));
-          onMemoryUpdate();
         } else if (event.type === 'done') {
           setMessages(prev => prev.map(msg => 
             msg.id === aiMsgId ? { ...msg, isTyping: false } : msg

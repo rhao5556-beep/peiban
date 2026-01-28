@@ -253,7 +253,8 @@ def main() -> None:
     output_path.write_text(report, encoding="utf-8")
     
     print(f"Report generated: {output_path}")
-    print("\n" + "=" * 60)
+    print("\n" + "="*60)
+    print(report)
 
 
 if __name__ == "__main__":

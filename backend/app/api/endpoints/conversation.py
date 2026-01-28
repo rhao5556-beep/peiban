@@ -9,7 +9,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user
-from app.core.database import get_db, get_neo4j_driver, get_milvus_collection, get_redis_client
+from app.core.database import (
+    get_db,
+    get_neo4j_driver,
+    get_milvus_collection,
+    get_redis_client,
+    milvus_connected,
+)
 from app.core.ids import normalize_uuid
 from app.models.session import Session, ConversationTurn
 from app.services.conversation_service import ConversationService, ConversationMode
@@ -44,6 +50,7 @@ class MessageResponse(BaseModel):
     memory_status: str = "pending"  # pending, committed
     mode: str = "hybrid"  # graph_only 或 hybrid
     context_source: Optional[dict] = None  # 上下文来源追踪
+    error_id: Optional[str] = None  # 仅在服务端异常降级时填充，便于定位日志
 
 
 class SessionResponse(BaseModel):
@@ -81,23 +88,25 @@ async def send_message(
 
         # 初始化服务
         neo4j_driver = get_neo4j_driver()
-        milvus_collection = get_milvus_collection()
+        milvus_collection = get_milvus_collection() if milvus_connected else None
+        redis_client = get_redis_client()
         
         graph_service = GraphService(neo4j_driver=neo4j_driver)
         retrieval_service = RetrievalService(
             milvus_client=milvus_collection,
-            graph_service=graph_service
+            graph_service=graph_service,
+            db_session=db
         )
-        affinity_service = AffinityService()
+        affinity_service = AffinityService(db_session=db)
         transaction_manager = TransactionManager(db_session=db)
-        idempotency_checker = IdempotencyChecker(redis_client=get_redis_client())
+        idempotency_checker = IdempotencyChecker(redis_client=redis_client)
         
         conversation_service = ConversationService(
             affinity_service=affinity_service,
             retrieval_service=retrieval_service,
             graph_service=graph_service,
             transaction_manager=transaction_manager,
-            idempotency_checker=idempotency_checker,
+            idempotency_checker=idempotency_checker
         )
         
         # 调用对话服务（传递 mode 参数实现物理隔离）
@@ -106,7 +115,8 @@ async def send_message(
             message=request.message,
             session_id=session_id,
             mode=request.mode,  # graph_only 或 hybrid
-            eval_mode=bool(request.eval_mode),
+            eval_mode=request.eval_mode,
+            idempotency_key=request.idempotency_key
         )
         
         return MessageResponse(
@@ -124,13 +134,14 @@ async def send_message(
         )
         
     except Exception as e:
-        logger.error(f"Conversation processing failed: {e}", exc_info=True)
-        reply = "抱歉，处理消息时出现了问题。请稍后再试。"
-        if bool(request.eval_mode):
-            reply = f"{type(e).__name__}: {e}"
+        error_id = str(uuid.uuid4())
+        logger.error(
+            f"Conversation processing failed: error_id={error_id}, user_id={user_id}, session_id={session_id}, mode={request.mode}, err={e}",
+            exc_info=True
+        )
         # 降级响应
         return MessageResponse(
-            reply=reply,
+            reply=f"抱歉，处理消息时出现了问题。请稍后再试。",
             session_id=session_id,
             turn_id=str(uuid.uuid4()),
             emotion={"primary_emotion": "neutral", "valence": 0.0, "confidence": 0.5},
@@ -138,7 +149,10 @@ async def send_message(
             memories_used=[],
             tone_type="friendly",
             response_time_ms=0,
-            memory_status="error"
+            memory_status="error",
+            mode=request.mode,
+            context_source={"mode": request.mode, "cached": False},
+            error_id=error_id
         )
 
 

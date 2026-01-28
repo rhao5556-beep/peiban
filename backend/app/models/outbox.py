@@ -16,10 +16,13 @@ class OutboxEvent(Base):
     event_id = Column(String(64), unique=True, nullable=False)
     memory_id = Column(UUID(as_uuid=True), ForeignKey("memories.id", ondelete="CASCADE"), nullable=True)
     payload = Column(JSON, nullable=False)
-    status = Column(String(20), default="pending")  # pending, processing, done, failed
+    status = Column(String(20), default="pending")  # pending, processing, done, failed, dlq, pending_review
     retry_count = Column(Integer, default=0)
     idempotency_key = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    processing_started_at = Column(DateTime, nullable=True)
+    milvus_written_at = Column(DateTime, nullable=True)
+    neo4j_written_at = Column(DateTime, nullable=True)
     processed_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
     
@@ -71,5 +74,6 @@ class UserProactivePreference(Base):
     quiet_hours_end = Column(Time, default=time(8, 0))
     max_daily_messages = Column(Integer, default=2)
     preferred_greeting_time = Column(Time, nullable=True)
+    timezone = Column(String(64), default="Asia/Shanghai")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)

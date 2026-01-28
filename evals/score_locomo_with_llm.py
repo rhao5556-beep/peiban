@@ -20,7 +20,7 @@ try:
     from dotenv import load_dotenv
     env_path = Path(__file__).parent / ".env.local"
     if env_path.exists():
-        load_dotenv(env_path, override=True)
+        load_dotenv(env_path)
 except ImportError:
     pass  # python-dotenv not installed, use system env vars
 
@@ -54,16 +54,7 @@ CATEGORY_NAMES = {
     2: "Temporal Understanding",
     3: "Reasoning & Inference",
     4: "Detailed Understanding",
-    5: "Unknown / Unanswerable",
 }
-
-
-def _get_env_first(*names: str) -> Optional[str]:
-    for name in names:
-        v = os.environ.get(name)
-        if v:
-            return v
-    return None
 
 
 def _load_json(path: Path) -> Any:
@@ -105,8 +96,6 @@ def _to_iso_date(s: str) -> Optional[str]:
 
 def _exact_match_score(reference: str, prediction: str, category: Optional[int]) -> bool:
     """Simple exact match scoring (fallback)"""
-    if category == 5 or not (reference or "").strip():
-        return False
     if category == 2:  # Temporal
         ref_iso = _to_iso_date(reference)
         pred_iso = _to_iso_date(prediction)
@@ -118,34 +107,6 @@ def _exact_match_score(reference: str, prediction: str, category: Optional[int])
     return bool(ref_n) and ref_n == pred_n
 
 
-def _is_refusal(prediction: str) -> bool:
-    p = _normalize_text(prediction)
-    if not p:
-        return True
-    cues = [
-        "i dont know",
-        "i do not know",
-        "dont know",
-        "do not know",
-        "unknown",
-        "not sure",
-        "cannot determine",
-        "cant determine",
-        "cannot answer",
-        "cant answer",
-        "no information",
-        "insufficient information",
-        "不知道",
-        "不清楚",
-        "无法确定",
-        "无法判断",
-        "无法回答",
-        "没有信息",
-        "信息不足",
-    ]
-    return any(c in p for c in cues)
-
-
 def _call_llm_judge(
     question: str,
     reference_answer: str,
@@ -154,6 +115,8 @@ def _call_llm_judge(
     api_key: str,
     api_base: str,
     model: str,
+    timeout_s: float,
+    max_retries: int,
 ) -> Tuple[bool, float, str]:
     """
     Call LLM to judge if the model answer is correct
@@ -176,7 +139,6 @@ Evaluation Guidelines:
 - For Temporal Understanding (Category 2): Check if dates/times are equivalent (e.g., "7 May 2023" = "May 7, 2023")
 - For Reasoning & Inference (Category 3): Check if the reasoning is sound and conclusion matches
 - For Detailed Understanding (Category 4): Check if the answer captures the essential details
-- For Unknown/Unanswerable (Category 5) OR when Reference Answer is empty/null: the correct behavior is to refuse (e.g., "I don't know") rather than hallucinate.
 
 Respond in JSON format:
 {{
@@ -187,51 +149,53 @@ Respond in JSON format:
 
 Be strict but fair. Minor paraphrasing is acceptable if the meaning is preserved."""
 
-    try:
-        response = requests.post(
-            f"{api_base.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
-                "max_tokens": 500,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        
-        content = response.json()["choices"][0]["message"]["content"]
-        
-        # Try to parse JSON from response
-        # Sometimes LLM wraps JSON in markdown code blocks
-        content = content.strip()
-        if content.startswith("```json"):
-            content = content[7:]
-        if content.startswith("```"):
-            content = content[3:]
-        if content.endswith("```"):
-            content = content[:-3]
-        content = content.strip()
-        
-        result = json.loads(content)
-        return (
-            bool(result.get("correct", False)),
-            float(result.get("confidence", 0.0)),
-            str(result.get("reasoning", "")),
-        )
-    
-    except Exception as e:
-        print(f"Warning: LLM judge failed: {e}")
-        # Fallback to exact match
-        if category == 5 or not (reference_answer or "").strip():
-            ok = _is_refusal(model_answer)
-            return ok, 1.0 if ok else 0.0, f"Fallback refusal-check due to error: {e}"
-        exact = _exact_match_score(reference_answer, model_answer, category)
-        return exact, 1.0 if exact else 0.0, f"Fallback to exact match due to error: {e}"
+    last_error: Exception | None = None
+    for attempt in range(max(1, int(max_retries) + 1)):
+        try:
+            response = requests.post(
+                f"{api_base.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.0,
+                    "max_tokens": 500,
+                },
+                timeout=float(timeout_s),
+            )
+            response.raise_for_status()
+
+            content = response.json()["choices"][0]["message"]["content"]
+            content = content.strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
+
+            result = json.loads(content)
+            return (
+                bool(result.get("correct", False)),
+                float(result.get("confidence", 0.0)),
+                str(result.get("reasoning", "")),
+            )
+        except Exception as e:
+            last_error = e
+            if attempt >= int(max_retries):
+                break
+            time.sleep(min(10.0, 1.5 ** attempt))
+
+    exact = _exact_match_score(reference_answer, model_answer, category)
+    return (
+        exact,
+        1.0 if exact else 0.0,
+        f"Fallback to exact match due to error: {last_error}",
+    )
 
 
 @dataclass(frozen=True)
@@ -254,6 +218,8 @@ def score_outputs_with_llm(
     api_base: Optional[str] = None,
     model: Optional[str] = None,
     rate_limit_delay: float = 0.1,
+    timeout_s: float = 120.0,
+    max_retries: int = 2,
 ) -> Tuple[Dict[str, Any], List[ScoredItem]]:
     """
     Score model outputs using LLM judge
@@ -270,19 +236,13 @@ def score_outputs_with_llm(
     
     for i, it in enumerate(items):
         qid = int(it.get("id") or 0)
+        task_type = str(it.get("task_type") or "")
         question = str(it.get("question") or "")
         ref = str(it.get("reference_answer") or "")
         pred = str(it.get("model_answer") or "")
         meta = it.get("meta") or {}
-        cat = it.get("category")
-        if cat is None:
-            cat = meta.get("category")
-        category: Optional[int] = None
-        if isinstance(cat, int):
-            category = cat
-        elif isinstance(cat, str) and cat.strip().isdigit():
-            category = int(cat.strip())
-        task_type = str(it.get("task_type") or "") or CATEGORY_NAMES.get(category or 0, "Unknown")
+        cat = meta.get("category")
+        category = int(cat) if isinstance(cat, int) else None
         
         # Always compute exact match
         exact_match = _exact_match_score(ref, pred, category)
@@ -298,6 +258,8 @@ def score_outputs_with_llm(
                     api_key=api_key,
                     api_base=api_base,
                     model=model,
+                    timeout_s=float(timeout_s),
+                    max_retries=int(max_retries),
                 )
                 
                 if i > 0 and rate_limit_delay > 0:
@@ -350,7 +312,7 @@ def score_outputs_with_llm(
         by_task[t]["confidence_sum"] += s.confidence
         
         c = str(s.category) if s.category is not None else "unknown"
-        cat_name = CATEGORY_NAMES.get(s.category, "Unknown") if s.category is not None else "Unknown"
+        cat_name = CATEGORY_NAMES.get(s.category, "Unknown") if s.category else "Unknown"
         by_cat.setdefault(c, {
             "category_name": cat_name,
             "total": 0,
@@ -399,17 +361,11 @@ def main() -> None:
     p.add_argument("--use_llm", action="store_true", default=True, help="Use LLM judge")
     p.add_argument("--no_llm", action="store_true", help="Disable LLM judge (exact match only)")
     p.add_argument("--api_key", default=os.environ.get("OPENAI_API_KEY"), help="API key")
-    p.add_argument(
-        "--api_base",
-        default=_get_env_first("OPENAI_API_BASE", "OPENAI_BASE_URL") or "https://api.siliconflow.cn/v1",
-        help="API base URL",
-    )
-    p.add_argument(
-        "--model",
-        default=os.environ.get("OPENAI_MODEL", "Pro/deepseek-ai/DeepSeek-V3"),
-        help="Judge model",
-    )
+    p.add_argument("--api_base", default=os.environ.get("OPENAI_API_BASE", "https://api.siliconflow.cn/v1"), help="API base URL")
+    p.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "Pro/deepseek-ai/DeepSeek-V3.2"), help="Judge model")
     p.add_argument("--rate_limit_delay", type=float, default=0.1, help="Delay between API calls")
+    p.add_argument("--timeout_s", type=float, default=120.0, help="Per-request timeout (seconds) for LLM judge")
+    p.add_argument("--max_retries", type=int, default=2, help="Max retries for LLM judge request")
     args = p.parse_args()
     
     use_llm = args.use_llm and not args.no_llm
@@ -435,6 +391,8 @@ def main() -> None:
         api_base=args.api_base,
         model=args.model,
         rate_limit_delay=args.rate_limit_delay,
+        timeout_s=args.timeout_s,
+        max_retries=args.max_retries,
     )
     
     print("\n" + "="*60)

@@ -18,18 +18,10 @@ try:
     from dotenv import load_dotenv
     env_path = Path(__file__).parent / ".env.local"
     if env_path.exists():
-        load_dotenv(env_path, override=True)
+        load_dotenv(env_path)
         print(f"Loaded environment from: {env_path}")
 except ImportError:
     pass  # python-dotenv not installed, use system env vars
-
-
-def _get_env_first(*names: str) -> Optional[str]:
-    for name in names:
-        v = os.environ.get(name)
-        if v:
-            return v
-    return None
 
 
 def check_backend(backend_url: str) -> bool:
@@ -66,11 +58,8 @@ def run_evaluation(
         "--eval_mode",
         "--limit_conversations", str(limit_conversations),
         "--limit_questions", str(limit_questions),
-        "--chunk_size", "24",
-        "--sleep_after_memorize_s", "0.2",
-        "--wait_outbox_timeout_s", "60",
-        "--wait_outbox_poll_interval_s", "0.2",
-        "--request_timeout_s", "120",
+        "--chunk_size", "64",
+        "--sleep_after_memorize_s", "0.5",
     ]
     
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -182,7 +171,11 @@ def generate_report(
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Complete LoCoMo Evaluation Pipeline")
-    p.add_argument("--backend_url", default="http://localhost:8000", help="Backend URL")
+    p.add_argument(
+        "--backend_url",
+        default=os.environ.get("AFFINITY_EVAL_BACKEND_BASE_URL", "http://localhost:8000"),
+        help="Backend URL",
+    )
     
     # Fix dataset path to be relative to project root
     project_root = Path(__file__).parent.parent
@@ -196,16 +189,8 @@ def main() -> int:
     p.add_argument("--limit_questions", type=int, default=0, help="Limit questions per conversation (0=all)")
     p.add_argument("--no_llm", action="store_true", help="Disable LLM judge (exact match only)")
     p.add_argument("--api_key", default=os.environ.get("OPENAI_API_KEY"), help="API key for LLM judge")
-    p.add_argument(
-        "--api_base",
-        default=_get_env_first("OPENAI_API_BASE", "OPENAI_BASE_URL") or "https://api.siliconflow.cn/v1",
-        help="API base URL",
-    )
-    p.add_argument(
-        "--model",
-        default=os.environ.get("OPENAI_MODEL", "Pro/deepseek-ai/DeepSeek-V3"),
-        help="Judge model",
-    )
+    p.add_argument("--api_base", default=os.environ.get("OPENAI_API_BASE", "https://api.siliconflow.cn/v1"), help="API base URL")
+    p.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "Pro/deepseek-ai/DeepSeek-V3.2"), help="Judge model")
     args = p.parse_args()
     
     print("="*60)

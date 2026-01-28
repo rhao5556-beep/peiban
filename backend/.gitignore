@@ -61,6 +61,7 @@ docker-compose.override.yml
 
 # Celery
 celerybeat-schedule
+celerybeat-schedule.*
 celerybeat.pid
 
 # OS

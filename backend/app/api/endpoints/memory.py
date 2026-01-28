@@ -1,5 +1,5 @@
 """记忆端点 - GDPR 合规删除"""
-from typing import Optional, List, Any, Dict
+from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from datetime import datetime
@@ -27,9 +27,6 @@ class MemoryResponse(BaseModel):
     status: str
     created_at: datetime
     committed_at: Optional[datetime] = None
-    outbox_status: Optional[str] = None
-    outbox_retry_count: Optional[int] = None
-    outbox_error_message: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -50,21 +47,6 @@ class MemorySearchResult(BaseModel):
     affinity_bonus: float
     recency_score: float
     final_score: float
-
-
-class TemporalMemorySearchRequest(BaseModel):
-    query: str = ""
-    top_k: int = 10
-    start_ts: Optional[datetime] = None
-    end_ts: Optional[datetime] = None
-    sort: str = "desc"
-
-
-class TemporalMemorySearchResult(BaseModel):
-    id: str
-    content: str
-    created_at: datetime
-    temporal: Dict[str, Any]
 
 
 class DeleteRequest(BaseModel):
@@ -115,6 +97,11 @@ def verify_audit_signature(audit_data: dict, signature: str) -> bool:
     return hmac.compare_digest(expected_hash, signature)
 
 
+def verify_audit_hash_integrity(audit_data: dict, stored_hash: str) -> bool:
+    expected_hash = generate_audit_hash(audit_data)
+    return hmac.compare_digest(expected_hash, stored_hash or "")
+
+
 @router.get("/{memory_id}", response_model=MemoryResponse)
 async def get_memory(
     memory_id: str,
@@ -142,27 +129,14 @@ async def get_memory(
     
     if not memory:
         raise HTTPException(status_code=404, detail="Memory not found")
-
-    from app.models.outbox import OutboxEvent
-    outbox_query = (
-        select(OutboxEvent)
-        .where(OutboxEvent.memory_id == mem_uuid)
-        .order_by(OutboxEvent.created_at.desc())
-        .limit(1)
-    )
-    outbox_result = await db.execute(outbox_query)
-    outbox = outbox_result.scalar_one_or_none()
-
+    
     return MemoryResponse(
         id=str(memory.id),
         content=memory.content,
         valence=memory.valence,
         status=memory.status,
         created_at=memory.created_at,
-        committed_at=memory.committed_at,
-        outbox_status=outbox.status if outbox else None,
-        outbox_retry_count=outbox.retry_count if outbox else None,
-        outbox_error_message=outbox.error_message if outbox else None,
+        committed_at=memory.committed_at
     )
 
 
@@ -246,64 +220,6 @@ async def search_memories(
         )
         for r in results
     ]
-
-
-@router.post("/temporal_search", response_model=List[TemporalMemorySearchResult])
-async def temporal_search_memories(
-    request: TemporalMemorySearchRequest,
-    current_user: dict = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    user_id = current_user["user_id"]
-    kw = (request.query or "").strip()
-    kw_like = f"%{kw}%" if kw else ""
-    order_dir = "DESC" if (request.sort or "").lower() != "asc" else "ASC"
-
-    from sqlalchemy import text as sql_text
-
-    sql = sql_text(
-        f"""
-        SELECT
-            id,
-            content,
-            created_at,
-            meta->'temporal' AS temporal
-        FROM memories
-        WHERE user_id = CAST(:user_id AS uuid)
-          AND status != 'deleted'
-          AND meta ? 'temporal'
-          AND (meta->'temporal'->>'precision') IN ('date', 'datetime')
-          AND (:kw_like = '' OR content ILIKE :kw_like)
-          AND (:start_ts IS NULL OR (meta->'temporal'->>'start_ts')::timestamptz >= CAST(:start_ts AS timestamptz))
-          AND (:end_ts IS NULL OR (meta->'temporal'->>'start_ts')::timestamptz <= CAST(:end_ts AS timestamptz))
-        ORDER BY (meta->'temporal'->>'start_ts')::timestamptz {order_dir}, created_at DESC
-        LIMIT :limit
-        """
-    )
-
-    result = await db.execute(
-        sql,
-        {
-            "user_id": user_id,
-            "kw_like": kw_like,
-            "start_ts": request.start_ts.isoformat() if request.start_ts else None,
-            "end_ts": request.end_ts.isoformat() if request.end_ts else None,
-            "limit": int(request.top_k or 10),
-        },
-    )
-    rows = result.fetchall()
-
-    out = []
-    for r in rows:
-        out.append(
-            TemporalMemorySearchResult(
-                id=str(r.id),
-                content=r.content,
-                created_at=r.created_at,
-                temporal=r.temporal or {},
-            )
-        )
-    return out
 
 
 @router.delete("/", response_model=DeletionAuditResponse)
@@ -490,8 +406,10 @@ async def verify_deletion_audit(
         "affected_records": audit.affected_records,
         "requested_at": audit.requested_at.isoformat()
     }
-    
-    is_valid = verify_audit_signature(audit_data, request.signature)
+
+    stored_ok = verify_audit_hash_integrity(audit_data, audit.audit_hash)
+    signature_ok = verify_audit_signature(audit_data, request.signature)
+    is_valid = stored_ok and signature_ok
     
     if is_valid:
         # 验证删除确实已执行
@@ -514,6 +432,6 @@ async def verify_deletion_audit(
     return AuditVerifyResponse(
         audit_id=request.audit_id,
         valid=is_valid,
-        message="Deletion verified successfully" if is_valid else "Invalid signature",
+        message="Deletion verified successfully" if is_valid else ("Audit hash mismatch" if not stored_ok else "Invalid signature"),
         verified_at=datetime.utcnow() if is_valid else None
     )

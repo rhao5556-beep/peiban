@@ -24,6 +24,16 @@ def _parse_hhmm(value: Optional[str]) -> Optional[time]:
         raise HTTPException(status_code=400, detail=f"Invalid time format: {value}") from e
 
 
+_ACK_TRANSITIONS = {
+    "pending": {"read", "ignore", "disable"},
+    "sent": {"read", "ignore", "disable"},
+    "delivered": {"read", "ignore", "disable"},
+    "read": {"read"},
+    "ignored": {"ignore"},
+    "cancelled": {"disable"},
+}
+
+
 @router.get("/messages")
 async def get_proactive_messages(
     status: Optional[str] = Query(None, description="过滤状态: pending, sent, read"),
@@ -98,14 +108,23 @@ async def acknowledge_message(
     # 更新状态
     now = datetime.utcnow()
     
+    if action not in _ACK_TRANSITIONS.get(message.status, set()):
+        raise HTTPException(status_code=409, detail="Invalid status transition")
+
     if action == "read":
+        if message.status == "read":
+            return {"success": True, "message_id": message_id, "action": action, "status": message.status}
         message.status = "read"
         message.read_at = now
-        message.user_response = None
+        message.user_response = "replied"
     elif action == "ignore":
+        if message.status == "ignored":
+            return {"success": True, "message_id": message_id, "action": action, "status": message.status}
         message.status = "ignored"
         message.user_response = "ignored"
     elif action == "disable":
+        if message.status == "cancelled":
+            return {"success": True, "message_id": message_id, "action": action, "status": message.status}
         message.status = "cancelled"
         message.user_response = "disabled"
         
@@ -168,7 +187,8 @@ async def get_proactive_preferences(
             "quiet_hours_end": "08:00",
             "max_messages_per_day": 2,
             "preferred_morning_time": "08:00",
-            "preferred_evening_time": "22:00"
+            "preferred_evening_time": "22:00",
+            "timezone": "Asia/Shanghai"
         }
     
     return {
@@ -180,7 +200,8 @@ async def get_proactive_preferences(
         "quiet_hours_end": preference.quiet_hours_end.strftime("%H:%M") if preference.quiet_hours_end else "08:00",
         "max_messages_per_day": preference.max_daily_messages or 2,
         "preferred_morning_time": "08:00",
-        "preferred_evening_time": "22:00"
+        "preferred_evening_time": "22:00",
+        "timezone": preference.timezone or "Asia/Shanghai"
     }
 
 
@@ -195,6 +216,7 @@ async def update_proactive_preferences(
     max_messages_per_day: Optional[int] = None,
     preferred_morning_time: Optional[str] = None,
     preferred_evening_time: Optional[str] = None,
+    timezone: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -230,6 +252,9 @@ async def update_proactive_preferences(
         preference.quiet_hours_end = _parse_hhmm(quiet_hours_end)
     if max_messages_per_day is not None:
         preference.max_daily_messages = max_messages_per_day
+
+    if timezone is not None:
+        preference.timezone = timezone
     
     await db.commit()
     await db.refresh(preference)
