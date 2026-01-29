@@ -3,7 +3,7 @@ from fastapi import APIRouter
 
 from app.api.endpoints import (
     conversation, memory, affinity, graph, auth, sse, metrics, profile,
-    content_recommendation, meme, proactive, evals
+    content_recommendation, meme, proactive
 )
 
 api_router = APIRouter()
@@ -25,9 +25,6 @@ api_router.include_router(graph.router, prefix="/graph", tags=["图谱"])
 
 # SSE 流式路由
 api_router.include_router(sse.router, prefix="/sse", tags=["流式"])
-
-# 评测辅助路由
-api_router.include_router(evals.router, prefix="/evals", tags=["评测"])
 
 # 用户画像路由
 api_router.include_router(profile.router, prefix="/users", tags=["用户画像"])

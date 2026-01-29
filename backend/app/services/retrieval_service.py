@@ -1,14 +1,13 @@
 """混合检索服务 - Vector + Graph + Entity Facts"""
-import asyncio
 import math
 import logging
 import json
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
 from datetime import datetime
+import uuid
 from openai import AsyncOpenAI
 from app.core.config import settings
-from circuitbreaker import circuit
 
 logger = logging.getLogger(__name__)
 
@@ -104,31 +103,27 @@ class EmbeddingService:
                 logger.debug(f"Embedding cache hit, time: {elapsed:.2f}ms")
                 return cached
         
-        last_error = None
-        for attempt in range(3):
-            try:
-                response = await self.client.embeddings.create(
-                    input=text,
-                    model=self.model_name,
-                    timeout=float(settings.EMBEDDING_REQUEST_TIMEOUT_S),
-                )
-                embedding = response.data[0].embedding
-
-                if use_cache:
-                    await self._cache_embedding(text, embedding)
-
-                elapsed = (datetime.now() - start_time).total_seconds() * 1000
-                logger.debug(f"Embedding computed, time: {elapsed:.2f}ms")
-
-                return embedding
-            except Exception as e:
-                last_error = e
-                if attempt >= 2:
-                    break
-                await asyncio.sleep(0.5 * (attempt + 1))
-
-        logger.error(f"Cloud embedding failed: {last_error}")
-        return [0.0] * 1024
+        # 调用 API
+        try:
+            response = await self.client.embeddings.create(
+                input=text,
+                model=self.model_name
+            )
+            embedding = response.data[0].embedding
+            
+            # 缓存结果
+            if use_cache:
+                await self._cache_embedding(text, embedding)
+            
+            elapsed = (datetime.now() - start_time).total_seconds() * 1000
+            logger.debug(f"Embedding computed, time: {elapsed:.2f}ms")
+            
+            return embedding
+            
+        except Exception as e:
+            logger.error(f"Cloud embedding failed: {e}")
+            # 返回零向量作为 fallback (1024维是 bge-m3 的输出维度)
+            return [0.0] * 1024
     
     async def _get_cached_embedding(self, text: str) -> Optional[List[float]]:
         """从缓存获取 embedding"""
@@ -306,14 +301,26 @@ class RetrievalService:
         """
         start_time = datetime.now()
         
-        query_embedding = await self.embedding_service.encode(query)
-        
-        # Step 1: Vector Search (Milvus -> Postgres -> Recent)
-        vector_candidates = await self._vector_search(user_id, query, query_embedding=query_embedding, top_k=50)
-        if not vector_candidates:
-            vector_candidates = await self._pg_vector_search(user_id, query_embedding=query_embedding, top_k=50)
-        if not vector_candidates:
-            vector_candidates = await self._recent_memories_search(user_id, limit=50)
+        # Step 1: Vector Search (Milvus)
+        vector_candidates = await self._vector_search(user_id, query, top_k=50)
+
+        if self.db:
+            try:
+                entity_names = await self._extract_query_entities(query)
+            except Exception:
+                entity_names = []
+            if entity_names:
+                pg_candidates = await self._postgres_entity_search(
+                    user_id=user_id,
+                    entity_names=entity_names,
+                    limit=30,
+                )
+                if pg_candidates:
+                    seen = {m.id for m in vector_candidates}
+                    for m in pg_candidates:
+                        if m.id not in seen:
+                            vector_candidates.append(m)
+                            seen.add(m.id)
         
         # Step 2: Graph Expansion (Neo4j)
         graph_expanded = await self._graph_expand(vector_candidates, user_id)
@@ -339,13 +346,11 @@ class RetrievalService:
         self,
         user_id: str,
         query: str,
-        query_embedding: List[float] | None = None,
         top_k: int = 50
     ) -> List[Memory]:
         """向量检索"""
         # 1. 编码查询文本
-        if query_embedding is None:
-            query_embedding = await self.embedding_service.encode(query)
+        query_embedding = await self.embedding_service.encode(query)
         
         if not self.milvus:
             logger.warning("Milvus client not initialized, returning empty results")
@@ -414,94 +419,6 @@ class RetrievalService:
         except Exception as e:
             logger.error(f"Vector search failed: {e}")
             return []
-
-    async def _pg_vector_search(
-        self,
-        user_id: str,
-        query_embedding: List[float],
-        top_k: int = 50
-    ) -> List[Memory]:
-        if not self.db:
-            return []
-
-        try:
-            from sqlalchemy import text
-            if len(query_embedding) < 1024:
-                query_embedding = query_embedding + [0.0] * (1024 - len(query_embedding))
-            elif len(query_embedding) > 1024:
-                query_embedding = query_embedding[:1024]
-            embedding_str = str(query_embedding)
-            result = await self.db.execute(
-                text("""
-                    SELECT
-                        id::text,
-                        content,
-                        valence,
-                        created_at,
-                        1 - (embedding <=> :query_embedding) AS score
-                    FROM memories
-                    WHERE user_id = :user_id
-                      AND status = 'committed'
-                      AND embedding IS NOT NULL
-                    ORDER BY embedding <=> :query_embedding
-                    LIMIT :top_k
-                """),
-                {"user_id": user_id, "query_embedding": embedding_str, "top_k": top_k}
-            )
-
-            memories = []
-            for row in result.fetchall():
-                created_at = row[3] if isinstance(row[3], datetime) else datetime.now()
-                cosine_sim = float(row[4]) if row[4] is not None else 0.0
-                memories.append(Memory(
-                    id=row[0],
-                    content=row[1] or "",
-                    cosine_sim=max(0.0, cosine_sim),
-                    valence=row[2] or 0.0,
-                    created_at=created_at,
-                    recency_score=self._calculate_recency(created_at)
-                ))
-            if memories:
-                logger.info(f"PG vector search returned {len(memories)} candidates")
-            return memories
-        except Exception as e:
-            logger.warning(f"PG vector search failed: {e}")
-            return []
-
-    async def _recent_memories_search(self, user_id: str, limit: int = 50) -> List[Memory]:
-        if not self.db:
-            return []
-
-        try:
-            from sqlalchemy import text
-            result = await self.db.execute(
-                text("""
-                    SELECT id::text, content, valence, created_at
-                    FROM memories
-                    WHERE user_id = :user_id
-                      AND status = 'committed'
-                    ORDER BY created_at DESC
-                    LIMIT :limit
-                """),
-                {"user_id": user_id, "limit": limit}
-            )
-            memories = []
-            for row in result.fetchall():
-                created_at = row[3] if isinstance(row[3], datetime) else datetime.now()
-                memories.append(Memory(
-                    id=row[0],
-                    content=row[1] or "",
-                    cosine_sim=0.0,
-                    valence=row[2] or 0.0,
-                    created_at=created_at,
-                    recency_score=self._calculate_recency(created_at)
-                ))
-            if memories:
-                logger.info(f"Recent memories fallback returned {len(memories)} candidates")
-            return memories
-        except Exception as e:
-            logger.warning(f"Recent memories fallback failed: {e}")
-            return []
     
     async def _graph_expand(
         self,
@@ -552,10 +469,57 @@ class RetrievalService:
         user_id: str,
         limit: int = 5
     ) -> List[Memory]:
-        """获取实体关联的记忆 - 由于 Milvus 没有 entity_id 字段，暂时返回空"""
-        # Milvus schema 中没有 entity_id 字段，图扩展功能暂不可用
-        # 未来可以通过 PostgreSQL 的 memory 表来实现
         return []
+
+    async def _postgres_entity_search(
+        self,
+        user_id: str,
+        entity_names: List[str],
+        limit: int = 30,
+    ) -> List[Memory]:
+        if not self.db:
+            return []
+        try:
+            user_uuid = uuid.UUID(user_id)
+        except Exception:
+            return []
+
+        names = [n.strip() for n in entity_names if n and n.strip()]
+        if not names:
+            return []
+
+        from sqlalchemy import or_, select
+        from app.models.memory import Memory as MemoryModel
+
+        clauses = [MemoryModel.content.ilike(f"%{n}%") for n in names[:10]]
+        stmt = (
+            select(MemoryModel)
+            .where(
+                MemoryModel.user_id == user_uuid,
+                MemoryModel.status == "committed",
+                or_(*clauses),
+            )
+            .order_by(MemoryModel.created_at.desc())
+            .limit(int(limit))
+        )
+
+        res = await self.db.execute(stmt)
+        rows = list(res.scalars().all())
+        out: List[Memory] = []
+        for r in rows:
+            created_at = r.created_at if isinstance(r.created_at, datetime) else datetime.now()
+            out.append(
+                Memory(
+                    id=str(r.id),
+                    content=r.content,
+                    cosine_sim=0.0,
+                    edge_weight=0.0,
+                    valence=float(r.valence or 0.0),
+                    created_at=created_at,
+                    recency_score=self._calculate_recency(created_at),
+                )
+            )
+        return out
     
     def _rerank(
         self,
@@ -725,15 +689,19 @@ class RetrievalService:
             neo4j_driver: Neo4j 驱动
             max_hops: 最大跳数 (默认 3)
         """
-        logger.info(f"retrieve_entity_facts: query_len={len(query) if query else 0}, user_id_prefix={str(user_id)[:8]}, max_hops={max_hops}")
+        logger.info(f"retrieve_entity_facts: query={query}, user={user_id}, max_hops={max_hops}")
+        from datetime import datetime
+        from app.services.temporal_normalizer import extract_temporal_constraints
+        date_constraints = extract_temporal_constraints(query, anchor_dt=datetime.utcnow(), timezone="UTC")
         
         # Step 1: 从 query 中提取实体名称
         entity_names = await self._extract_query_entities(query)
         
         if not entity_names:
-            logger.info("No entities extracted from query")
+            logger.info(f"No entities extracted from query")
             return []
-        logger.info(f"Extracted entities count: {len(entity_names)}")
+        
+        logger.info(f"Extracted entities: {entity_names}")
         
         # Step 2 & 3: 查询 Neo4j 获取实体的所有关系
         driver = neo4j_driver or self.graph
@@ -839,6 +807,56 @@ class RetrievalService:
                                 "hop": 1,
                                 "path_type": "direct"
                             })
+
+                        user_to_entity_query = """
+                        MATCH (u:User {id: $user_id})-[r]->(e {id: $entity_id, user_id: $user_id})
+                        RETURN coalesce(u.name, '用户') AS source_name, type(r) AS relation_type,
+                               e.name AS target_name, r.desc AS description,
+                               coalesce(r.weight, 0.5) AS weight,
+                               1 AS hop_distance
+                        """
+                        u_out = await session.run(
+                            user_to_entity_query,
+                            entity_id=entity_id,
+                            user_id=user_id,
+                        )
+                        async for rec in u_out:
+                            facts.append(
+                                {
+                                    "entity": rec["source_name"],
+                                    "relation": rec["relation_type"],
+                                    "target": rec["target_name"],
+                                    "description": rec["description"],
+                                    "weight": rec["weight"],
+                                    "hop": 1,
+                                    "path_type": "user",
+                                }
+                            )
+
+                        entity_to_user_query = """
+                        MATCH (e {id: $entity_id, user_id: $user_id})-[r]->(u:User {id: $user_id})
+                        RETURN e.name AS source_name, type(r) AS relation_type,
+                               coalesce(u.name, '用户') AS target_name, r.desc AS description,
+                               coalesce(r.weight, 0.5) AS weight,
+                               1 AS hop_distance
+                        """
+                        u_in = await session.run(
+                            entity_to_user_query,
+                            entity_id=entity_id,
+                            user_id=user_id,
+                        )
+                        async for rec in u_in:
+                            facts.append(
+                                {
+                                    "entity": rec["source_name"],
+                                    "relation": rec["relation_type"],
+                                    "target": rec["target_name"],
+                                    "description": rec["description"],
+                                    "weight": rec["weight"],
+                                    "hop": 1,
+                                    "path_type": "user",
+                                }
+                            )
                         
                         # ========== 2-hop: 间接关系 ==========
                         # 通过中间节点的路径: entity -> mid -> target
@@ -996,6 +1014,11 @@ class RetrievalService:
                 )
                 unique_facts.extend(semantic_facts)
             
+            if date_constraints:
+                event_facts = await self._retrieve_event_struct_facts(session, user_id, date_constraints)
+                if event_facts:
+                    unique_facts.extend(event_facts)
+
             # 按 hop 排序（直接关系优先）
             unique_facts.sort(key=lambda x: (x.get("hop", 1), -x.get("weight", 0)))
             
@@ -1005,6 +1028,98 @@ class RetrievalService:
         except Exception as e:
             logger.error(f"Entity facts retrieval failed: {e}", exc_info=True)
             return []
+
+    async def _retrieve_event_struct_facts(
+        self,
+        session,
+        user_id: str,
+        constraints: List[Dict[str, Any]],
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        if not constraints:
+            return []
+
+        start = None
+        end = None
+        for c in constraints:
+            if c.get("start") and c.get("end"):
+                start = str(c["start"])
+                end = str(c["end"])
+                break
+
+        if not start or not end:
+            return []
+
+        q = """
+        MATCH (e:Event {user_id: $user_id})
+        WHERE e.start_date >= $start_date AND e.start_date <= $end_date
+        RETURN e.id AS id, e.name AS name,
+               e.start_date AS start_date, e.end_date AS end_date,
+               e.duration_seconds AS duration_seconds,
+               e.cost_value AS cost_value, e.cost_unit AS cost_unit
+        ORDER BY e.start_date DESC
+        LIMIT $limit
+        """
+        res = await session.run(q, user_id=user_id, start_date=start, end_date=end, limit=int(limit))
+
+        out: List[Dict[str, Any]] = []
+        async for r in res:
+            name = r.get("name") or r.get("id") or "event"
+            sd = r.get("start_date")
+            ed = r.get("end_date")
+            if sd:
+                out.append(
+                    {
+                        "entity": name,
+                        "relation": "HAPPENED_AT",
+                        "target": sd,
+                        "description": "事件结构化字段",
+                        "weight": 1.0,
+                        "hop": 0,
+                        "path_type": "event_struct",
+                    }
+                )
+            if ed and ed != sd:
+                out.append(
+                    {
+                        "entity": name,
+                        "relation": "RELATED_TO",
+                        "target": ed,
+                        "description": "事件结构化字段",
+                        "weight": 0.9,
+                        "hop": 0,
+                        "path_type": "event_struct",
+                    }
+                )
+            dur = r.get("duration_seconds")
+            if dur is not None:
+                out.append(
+                    {
+                        "entity": name,
+                        "relation": "LASTED",
+                        "target": str(int(dur)),
+                        "description": "事件结构化字段",
+                        "weight": 0.95,
+                        "hop": 0,
+                        "path_type": "event_struct",
+                    }
+                )
+            cv = r.get("cost_value")
+            cu = r.get("cost_unit")
+            if cv is not None and cu:
+                out.append(
+                    {
+                        "entity": name,
+                        "relation": "COST",
+                        "target": f"{float(cv)} {cu}",
+                        "description": "事件结构化字段",
+                        "weight": 0.95,
+                        "hop": 0,
+                        "path_type": "event_struct",
+                    }
+                )
+
+        return out
     
     async def _semantic_expand_query(
         self,
@@ -1037,6 +1152,13 @@ class RetrievalService:
             "工作": ["WORKS_AT", "EMPLOYED_BY"],
             "认识": ["KNOWS", "FRIEND_OF", "RELATED_TO"],
             "是": ["IS_A", "WORKS_AS", "RELATED_TO"],
+            "时间": ["HAPPENED_AT", "RELATED_TO"],
+            "哪天": ["HAPPENED_AT", "RELATED_TO"],
+            "什么时候": ["HAPPENED_AT", "RELATED_TO"],
+            "多久": ["LASTED", "RELATED_TO"],
+            "多长": ["LASTED", "RELATED_TO"],
+            "花费": ["COST", "RELATED_TO"],
+            "花了": ["COST", "RELATED_TO"],
         }
         
         # 从查询中识别意图
@@ -1106,14 +1228,12 @@ class RetrievalService:
         """
         try:
             # 使用轻量级 prompt 提取实体，支持语义概念
-            @circuit(failure_threshold=5, recovery_timeout=60)
-            async def _call_llm():
-                return await self.embedding_service.client.chat.completions.create(
-                    model=settings.OPENAI_MODEL,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": """你是一个实体识别器。从用户的问题中提取被询问的实体名称。
+            response = await self.embedding_service.client.chat.completions.create(
+                model="deepseek-ai/DeepSeek-V3",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """你是一个实体识别器。从用户的问题中提取被询问的实体名称。
 
 规则：
 1. 提取问题中明确提到的人名、地名、事物名
@@ -1129,17 +1249,15 @@ class RetrievalService:
 - "谁来自南方" → ["南方"]
 - "今天天气怎么样" → []
 - "你好" → []"""
-                        },
-                        {
-                            "role": "user",
-                            "content": f"问题：{query}\n\n请提取实体名称（JSON数组）："
-                        }
-                    ],
-                    temperature=0.0,
-                    max_tokens=100
-                )
-
-            response = await _call_llm()
+                    },
+                    {
+                        "role": "user",
+                        "content": f"问题：{query}\n\n请提取实体名称（JSON数组）："
+                    }
+                ],
+                temperature=0.0,
+                max_tokens=100
+            )
             
             content = response.choices[0].message.content.strip()
             
@@ -1160,16 +1278,28 @@ class RetrievalService:
             
         except Exception as e:
             logger.warning(f"Entity extraction from query failed: {e}")
-            # 简单回退：提取中文人名模式
+            # 简单回退：提取中文/英文实体模式
             import re
             # 匹配常见人名模式（2-4个汉字 + 可选的称呼后缀）
             patterns = [
                 r'([二三四五六七八九十]丫)',  # 二丫、三丫等
                 r'([\u4e00-\u9fa5]{1,2}[哥姐弟妹叔婶])',  # 昊哥、小妹等
                 r'([\u4e00-\u9fa5]{2,4}(?=喜欢|讨厌|是|来自|住在|工作))',  # 名字+动词
+                r'\b([A-Z][a-z]{1,20})\b',  # Caroline, Jon, Gina
             ]
             entities = []
             for pattern in patterns:
                 matches = re.findall(pattern, query)
                 entities.extend(matches)
-            return list(set(entities))
+            out = []
+            seen = set()
+            for x in entities:
+                s = str(x).strip()
+                if not s:
+                    continue
+                key = s.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(s)
+            return out

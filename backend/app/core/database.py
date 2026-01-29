@@ -1,16 +1,14 @@
 """数据库连接管理"""
 import asyncio
-from typing import TYPE_CHECKING, Any
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from sqlalchemy import text
 from neo4j import AsyncGraphDatabase
+from pymilvus import connections, Collection
+from pymilvus.exceptions import ConnectionNotExistException
 import redis.asyncio as redis
 
 from app.core.config import settings
-
-if TYPE_CHECKING:
-    from pymilvus import Collection as MilvusCollection
 
 
 async def wait_for_postgres(max_retries: int = 30, delay: float = 2.0):
@@ -66,16 +64,9 @@ async def init_db():
     
     # Redis
     redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
-
-    async with engine.begin() as conn:
-        await conn.execute(
-            text("ALTER TABLE memories ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb")
-        )
     
     # Milvus
     try:
-        from pymilvus import connections
-
         connections.connect(
             alias="default",
             host=settings.MILVUS_HOST,
@@ -93,7 +84,7 @@ async def init_db():
 
 def _ensure_milvus_collection():
     """确保 Milvus collection 存在，不存在则创建"""
-    from pymilvus import utility, FieldSchema, CollectionSchema, DataType, Collection
+    from pymilvus import utility, FieldSchema, CollectionSchema, DataType
     
     collection_name = settings.MILVUS_COLLECTION
     
@@ -158,12 +149,7 @@ async def close_db():
         await redis_client.close()
     
     if milvus_connected:
-        try:
-            from pymilvus import connections
-
-            connections.disconnect("default")
-        except Exception:
-            pass
+        connections.disconnect("default")
 
 
 async def get_db() -> AsyncSession:
@@ -185,9 +171,12 @@ def get_redis_client():
     return redis_client
 
 
-def get_milvus_collection(name: str = None) -> Any:
+def get_milvus_collection(name: str = None) -> Collection:
     """获取 Milvus Collection"""
-    from pymilvus import Collection
-
+    if not milvus_connected:
+        return None
     collection_name = name or settings.MILVUS_COLLECTION
-    return Collection(collection_name)
+    try:
+        return Collection(collection_name)
+    except ConnectionNotExistException:
+        return None

@@ -20,8 +20,6 @@ from datetime import datetime, timedelta, time
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
 from enum import Enum
-from zoneinfo import ZoneInfo
-import json
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -101,7 +99,6 @@ class UserPreference:
     quiet_hours_end: time = time(8, 0)     # 免打扰结束
     max_daily_messages: int = 2            # 每日最大主动消息数
     preferred_greeting_time: Optional[time] = None
-    timezone: str = "Asia/Shanghai"
 
 
 # ==================== 触发引擎 ====================
@@ -178,11 +175,6 @@ class TriggerEngine:
     def __init__(self, db_session: AsyncSession = None):
         self.db = db_session
         self.rules = self.DEFAULT_RULES.copy()
-
-    def load_rules_from_config(self, rules_config: Any) -> None:
-        rules = _build_trigger_rules_from_dicts(rules_config)
-        if rules:
-            self.rules = rules
     
     async def check_triggers(
         self,
@@ -197,11 +189,7 @@ class TriggerEngine:
             return []
         
         triggered_rules = []
-        now_utc = datetime.utcnow()
-        try:
-            local_now = now_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo(user_preference.timezone)).replace(tzinfo=None)
-        except Exception:
-            local_now = now_utc
+        current_time = datetime.now()
         
         for rule in self.rules:
             if not rule.enabled:
@@ -212,11 +200,11 @@ class TriggerEngine:
                 continue
             
             # 检查冷却时间
-            if await self._is_in_cooldown(user_id, rule, now_utc):
+            if await self._is_in_cooldown(user_id, rule, current_time):
                 continue
             
             # 检查免打扰时间
-            if self._is_quiet_hours(local_now.time(), user_preference):
+            if self._is_quiet_hours(current_time.time(), user_preference):
                 continue
             
             # 检查每日限额
@@ -224,12 +212,8 @@ class TriggerEngine:
                 continue
             
             # 检查具体触发条件
-            if rule.trigger_type == TriggerType.TIME:
-                if self._check_time_condition(rule.condition, local_now):
-                    triggered_rules.append(rule)
-            else:
-                if await self._check_condition(user_id, rule, now_utc):
-                    triggered_rules.append(rule)
+            if await self._check_condition(user_id, rule, current_time):
+                triggered_rules.append(rule)
         
         # 按优先级排序
         triggered_rules.sort(key=lambda r: r.priority, reverse=True)
@@ -375,7 +359,7 @@ class TriggerEngine:
                 return False
             
             last_interaction = row[0]
-            days_since = (datetime.utcnow() - last_interaction).days
+            days_since = (datetime.now() - last_interaction).days
             
             return days_since >= days_threshold
         except Exception as e:
@@ -592,17 +576,6 @@ class DeliveryManager:
     
     def __init__(self, db_session: AsyncSession = None):
         self.db = db_session
-
-    def _is_valid_transition(self, current: str, target: str) -> bool:
-        allowed = {
-            "pending": {"sent", "cancelled"},
-            "sent": {"delivered", "read", "ignored", "cancelled"},
-            "delivered": {"read", "ignored", "cancelled"},
-            "read": {"read"},
-            "ignored": {"ignored"},
-            "cancelled": {"cancelled"},
-        }
-        return target in allowed.get(current, set())
     
     async def schedule_message(
         self,
@@ -639,11 +612,7 @@ class DeliveryManager:
             # TODO: 对接实际的推送服务
             # await push_service.send(message.user_id, message.content)
             
-            current_status = message.status or "pending"
-            if not self._is_valid_transition(current_status, "sent"):
-                return False
-
-            message.sent_at = datetime.utcnow()
+            message.sent_at = datetime.now()
             message.status = "sent"
             
             if self.db:
@@ -665,9 +634,8 @@ class DeliveryManager:
             await self.db.execute(
                 text("""
                     UPDATE proactive_messages
-                    SET read_at = NOW(), status = 'read', user_response = 'replied'
+                    SET read_at = NOW(), status = 'read'
                     WHERE id = :id
-                      AND status IN ('sent', 'delivered')
                 """),
                 {"id": message_id}
             )
@@ -704,6 +672,7 @@ class DeliveryManager:
     async def _save_message(self, message: ProactiveMessage) -> bool:
         """保存消息到数据库"""
         try:
+            import json
             await self.db.execute(
                 text("""
                     INSERT INTO proactive_messages
@@ -733,7 +702,7 @@ class DeliveryManager:
                 text("""
                     UPDATE proactive_messages
                     SET sent_at = :sent_at, status = :status
-                    WHERE id = :id AND status = 'pending'
+                    WHERE id = :id
                 """),
                 {
                     "id": message.id,
@@ -777,7 +746,7 @@ class FeedbackTracker:
                     FROM proactive_messages
                     WHERE user_id = :user_id 
                       AND sent_at > NOW() - INTERVAL :days DAY
-                      AND sent_at IS NOT NULL
+                      AND status = 'sent'
                 """),
                 {"user_id": user_id, "days": f"{days} days"}
             )
@@ -802,7 +771,6 @@ class FeedbackTracker:
                     FROM proactive_messages
                     WHERE user_id = :user_id 
                       AND user_response = 'replied'
-                      AND sent_at IS NOT NULL
                     GROUP BY hour
                     ORDER BY count DESC
                     LIMIT 1
@@ -853,10 +821,6 @@ class ProactiveService:
         """
         if user_preference is None:
             user_preference = UserPreference(user_id=user_id)
-
-        if self.db:
-            rules_config = await self._load_user_rules_config(user_id)
-            self.trigger_engine.load_rules_from_config(rules_config)
         
         # 1. 检查触发条件
         triggered_rules = await self.trigger_engine.check_triggers(
@@ -896,38 +860,8 @@ class ProactiveService:
     
     async def get_user_preference(self, user_id: str) -> UserPreference:
         """获取用户偏好设置"""
-        if not self.db:
-            return UserPreference(user_id=user_id)
-
-        try:
-            import uuid as _uuid
-            from sqlalchemy import select
-            from app.models.outbox import UserProactivePreference
-
-            user_uuid = _uuid.UUID(user_id)
-            result = await self.db.execute(
-                select(UserProactivePreference).where(UserProactivePreference.user_id == user_uuid)
-            )
-            row = result.scalar_one_or_none()
-            if not row:
-                return UserPreference(user_id=user_id)
-
-            return UserPreference(
-                user_id=user_id,
-                proactive_enabled=bool(row.proactive_enabled),
-                morning_greeting=bool(row.morning_greeting),
-                evening_greeting=bool(row.evening_greeting),
-                silence_reminder=bool(row.silence_reminder),
-                event_reminder=bool(row.event_reminder),
-                quiet_hours_start=row.quiet_hours_start or time(22, 0),
-                quiet_hours_end=row.quiet_hours_end or time(8, 0),
-                max_daily_messages=row.max_daily_messages or 2,
-                preferred_greeting_time=row.preferred_greeting_time,
-                timezone=row.timezone or "Asia/Shanghai",
-            )
-        except Exception as e:
-            logger.error(f"Failed to load user preference: {e}")
-            return UserPreference(user_id=user_id)
+        # TODO: 从数据库加载
+        return UserPreference(user_id=user_id)
     
     async def update_user_preference(
         self,
@@ -936,88 +870,11 @@ class ProactiveService:
     ) -> UserPreference:
         """更新用户偏好设置"""
         pref = await self.get_user_preference(user_id)
-
+        
         for key, value in updates.items():
             if hasattr(pref, key):
                 setattr(pref, key, value)
-
-        if not self.db:
-            return pref
-
-        try:
-            import uuid as _uuid
-            from sqlalchemy import select
-            from app.models.outbox import UserProactivePreference
-
-            user_uuid = _uuid.UUID(user_id)
-            result = await self.db.execute(
-                select(UserProactivePreference).where(UserProactivePreference.user_id == user_uuid)
-            )
-            row = result.scalar_one_or_none()
-            if not row:
-                row = UserProactivePreference(user_id=user_uuid)
-                self.db.add(row)
-
-            row.proactive_enabled = pref.proactive_enabled
-            row.morning_greeting = pref.morning_greeting
-            row.evening_greeting = pref.evening_greeting
-            row.silence_reminder = pref.silence_reminder
-            row.event_reminder = pref.event_reminder
-            row.quiet_hours_start = pref.quiet_hours_start
-            row.quiet_hours_end = pref.quiet_hours_end
-            row.max_daily_messages = pref.max_daily_messages
-            row.preferred_greeting_time = pref.preferred_greeting_time
-            row.timezone = pref.timezone
-
-            await self.db.commit()
-        except Exception as e:
-            await self.db.rollback()
-            logger.error(f"Failed to update user preference: {e}")
-
+        
+        # TODO: 保存到数据库
+        
         return pref
-
-    async def _load_user_rules_config(self, user_id: str) -> Any:
-        try:
-            import uuid as _uuid
-            from sqlalchemy import select
-            from app.models.user import User
-
-            user_uuid = _uuid.UUID(user_id)
-            result = await self.db.execute(select(User).where(User.id == user_uuid))
-            user = result.scalar_one_or_none()
-            if not user:
-                return None
-            settings_obj = user.settings or {}
-            return settings_obj.get("proactive_rules")
-        except Exception:
-            return None
-
-
-def _build_trigger_rules_from_dicts(config: Any) -> List[TriggerRule]:
-    if not isinstance(config, list):
-        return []
-    rules: List[TriggerRule] = []
-    for item in config:
-        if not isinstance(item, dict):
-            continue
-        trigger_type = item.get("trigger_type")
-        condition = item.get("condition")
-        action = item.get("action")
-        if not trigger_type or not condition or not action:
-            continue
-        try:
-            tt = TriggerType(trigger_type)
-        except Exception:
-            continue
-        rules.append(
-            TriggerRule(
-                trigger_type=tt,
-                condition=condition,
-                action=action,
-                priority=int(item.get("priority", 5)),
-                cooldown_hours=int(item.get("cooldown_hours", 24)),
-                min_affinity_state=str(item.get("min_affinity_state", "acquaintance")),
-                enabled=bool(item.get("enabled", True)),
-            )
-        )
-    return rules

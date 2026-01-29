@@ -5,6 +5,7 @@ from typing import AsyncGenerator, Generator
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
+from app.main import app
 from app.core.config import settings
 from app.core.database import Base, get_db
 
@@ -57,7 +58,6 @@ async def db_session(test_engine) -> AsyncGenerator[AsyncSession, None]:
 @pytest.fixture
 async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
     """创建测试客户端"""
-    from app.main import app
     
     async def override_get_db():
         yield db_session

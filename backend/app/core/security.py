@@ -1,7 +1,6 @@
 """安全相关 - JWT 认证"""
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional
-import uuid
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
@@ -19,61 +18,9 @@ security = HTTPBearer()
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """创建 JWT Token"""
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.JWT_EXPIRE_MINUTES))
-    to_encode.setdefault("type", "access")
-    to_encode.setdefault("jti", uuid.uuid4().hex)
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=settings.JWT_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
-
-
-def create_refresh_token(user_id: str, expires_delta: Optional[timedelta] = None) -> str:
-    expire = datetime.now(timezone.utc) + (
-        expires_delta or timedelta(days=int(getattr(settings, "JWT_REFRESH_EXPIRE_DAYS", 14)))
-    )
-    payload = {
-        "sub": user_id,
-        "type": "refresh",
-        "jti": uuid.uuid4().hex,
-        "exp": expire,
-    }
-    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
-
-
-async def revoke_token_jti(jti: str, exp_ts: int | None = None) -> None:
-    if not jti:
-        return
-    try:
-        from app.core.database import get_redis_client
-
-        redis_client = get_redis_client()
-        if not redis_client:
-            return
-        ttl = None
-        if exp_ts:
-            ttl = max(1, int(exp_ts - datetime.now(timezone.utc).timestamp()))
-        key = f"jwt:revoked:{jti}"
-        if ttl:
-            await redis_client.set(key, "1", ex=ttl)
-        else:
-            await redis_client.set(key, "1")
-    except Exception:
-        return
-
-
-async def is_token_revoked(jti: str) -> bool:
-    if not jti:
-        return False
-    try:
-        from app.core.database import get_redis_client
-
-        redis_client = get_redis_client()
-        if not redis_client:
-            return False
-        key = f"jwt:revoked:{jti}"
-        return bool(await redis_client.get(key))
-    except Exception:
-        return False
-
 
 
 def verify_token(token: str) -> dict:
@@ -87,23 +34,6 @@ def verify_token(token: str) -> dict:
             detail="Invalid token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-
-async def verify_refresh_token(token: str) -> dict:
-    payload = verify_token(token)
-    if payload.get("type") != "refresh":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token type",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    if await is_token_revoked(payload.get("jti")):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token revoked",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return payload
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

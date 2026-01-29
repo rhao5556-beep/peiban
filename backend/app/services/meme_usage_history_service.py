@@ -104,7 +104,6 @@ class MemeUsageHistoryService:
     async def record_feedback(
         self,
         usage_id: UUID,
-        user_id: UUID,
         reaction: str
     ) -> bool:
         """
@@ -112,7 +111,6 @@ class MemeUsageHistoryService:
         
         Args:
             usage_id: 使用历史记录ID
-            user_id: 用户ID
             reaction: 用户反应（liked, ignored, disliked）
         
         Returns:
@@ -131,22 +129,15 @@ class MemeUsageHistoryService:
             
             # 获取使用历史记录
             result = await self.db.execute(
-                select(MemeUsageHistory).where(
-                    and_(
-                        MemeUsageHistory.id == usage_id,
-                        MemeUsageHistory.user_id == user_id,
-                    )
-                )
+                select(MemeUsageHistory).where(MemeUsageHistory.id == usage_id)
             )
             usage = result.scalar_one_or_none()
             
             if not usage:
-                logger.warning(f"Usage history not found for user: usage_id={usage_id}")
+                logger.warning(f"Usage history not found: {usage_id}")
                 return False
             
-            if usage.user_reaction is not None:
-                return usage.user_reaction == reaction
-
+            # 更新反应
             usage.user_reaction = reaction
             
             await self.db.commit()

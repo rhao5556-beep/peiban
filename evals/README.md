@@ -15,7 +15,7 @@
 - `AFFINITY_EVAL_OPENAI_BASE_URL`：用于评测裁判/基线的 Base URL（例如 `https://api.siliconflow.cn/v1`）
 - `AFFINITY_EVAL_BACKEND_BASE_URL`：后端地址（默认 `http://localhost:8010`）
 - `AFFINITY_EVAL_ENABLE_JUDGE`：`1` 开启 Judge；没有 key 会自动降级为关闭
-- `AFFINITY_EVAL_JUDGE_MODEL`：Judge 使用的模型（建议填硅基流动可用的模型，例如 `Pro/deepseek-ai/DeepSeek-V3.2`）
+- `AFFINITY_EVAL_JUDGE_MODEL`：Judge 使用的模型（建议填硅基流动可用的模型，例如 `deepseek-ai/DeepSeek-V3`）
 - `AFFINITY_EVAL_BASELINE_MODEL`：pairwise 基线模型（默认同 Judge）
 
 `evals/.gitignore` 已忽略 `.env.local`，避免密钥被误提交。

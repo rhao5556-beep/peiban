@@ -17,10 +17,10 @@
 
 ## 1. OPENAI_API_KEY - 硅基流动 API Key
 
-### ✅ 当前配置（已正确）
+### ✅ 示例配置（请把真实值放到 `.env`，不要提交到 Git）
 
 ```env
-OPENAI_API_KEY=sk-********
+OPENAI_API_KEY=sk-your-siliconflow-api-key-here
 OPENAI_API_BASE=https://api.siliconflow.cn/v1
 OPENAI_MODEL=Pro/deepseek-ai/DeepSeek-V3.2
 ```
@@ -29,7 +29,7 @@ OPENAI_MODEL=Pro/deepseek-ai/DeepSeek-V3.2
 
 - **用途**: AI 对话、实体提取、冲突解决
 - **提供商**: 硅基流动 (SiliconFlow)
-- **模型**: DeepSeek-V3.2
+- **模型**: DeepSeek-V3
 - **费用**: 按使用量计费（非常便宜）
 - **获取方式**: https://siliconflow.cn
 
@@ -43,7 +43,7 @@ OPENAI_MODEL=Pro/deepseek-ai/DeepSeek-V3.2
 
 ### 费用参考
 
-- DeepSeek-V3.2: 约 ¥0.0014/1K tokens（输入）
+- DeepSeek-V3: 约 ¥0.0014/1K tokens（输入）
 - 非常便宜，日常使用几乎可以忽略不计
 
 ---
@@ -82,7 +82,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 ```env
 # 生成的随机密钥（示例）
-JWT_SECRET=********
+JWT_SECRET=your-strong-jwt-secret-change-in-production
 ```
 
 **⚠️ 重要**: 
@@ -200,12 +200,12 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 ```env
 # OpenAI 配置（已正确）
-OPENAI_API_KEY=sk-********
+OPENAI_API_KEY=sk-your-siliconflow-api-key-here
 OPENAI_API_BASE=https://api.siliconflow.cn/v1
-OPENAI_MODEL=Pro/deepseek-ai/DeepSeek-V3.2
+OPENAI_MODEL=deepseek-ai/DeepSeek-V3
 
 # JWT 密钥（需要替换为生成的随机字符串）
-JWT_SECRET=********
+JWT_SECRET=your-strong-jwt-secret-change-in-production
 
 # 以下配置不需要（可以删除或留空）
 # WEIBO_API_KEY=
@@ -272,7 +272,7 @@ export JWT_SECRET="your-secret-here"
 ## ❓ 常见问题
 
 ### Q1: 硅基流动 API 很贵吗？
-**A**: 非常便宜！DeepSeek-V3.2 约 ¥0.0014/1K tokens，日常使用几乎可以忽略不计。
+**A**: 非常便宜！DeepSeek-V3 约 ¥0.0014/1K tokens，日常使用几乎可以忽略不计。
 
 ### Q2: 必须使用微博官方 API 吗？
 **A**: 不需要！我们使用 RSSHub（完全免费），不需要任何 API Key。

@@ -113,7 +113,7 @@ python affinity_evals/knowmebench/official_judge.py \
 ```json
 {
   "meta": {
-    "judge_model": "Pro/deepseek-ai/DeepSeek-V3.2",
+    "judge_model": "deepseek-ai/DeepSeek-V3",
     "total_items": 100,
     "evaluated_items": 98,
     "average_score": 3.45

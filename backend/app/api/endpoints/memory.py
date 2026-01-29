@@ -97,11 +97,6 @@ def verify_audit_signature(audit_data: dict, signature: str) -> bool:
     return hmac.compare_digest(expected_hash, signature)
 
 
-def verify_audit_hash_integrity(audit_data: dict, stored_hash: str) -> bool:
-    expected_hash = generate_audit_hash(audit_data)
-    return hmac.compare_digest(expected_hash, stored_hash or "")
-
-
 @router.get("/{memory_id}", response_model=MemoryResponse)
 async def get_memory(
     memory_id: str,
@@ -406,10 +401,8 @@ async def verify_deletion_audit(
         "affected_records": audit.affected_records,
         "requested_at": audit.requested_at.isoformat()
     }
-
-    stored_ok = verify_audit_hash_integrity(audit_data, audit.audit_hash)
-    signature_ok = verify_audit_signature(audit_data, request.signature)
-    is_valid = stored_ok and signature_ok
+    
+    is_valid = verify_audit_signature(audit_data, request.signature)
     
     if is_valid:
         # 验证删除确实已执行
@@ -432,6 +425,6 @@ async def verify_deletion_audit(
     return AuditVerifyResponse(
         audit_id=request.audit_id,
         valid=is_valid,
-        message="Deletion verified successfully" if is_valid else ("Audit hash mismatch" if not stored_ok else "Invalid signature"),
+        message="Deletion verified successfully" if is_valid else "Invalid signature",
         verified_at=datetime.utcnow() if is_valid else None
     )

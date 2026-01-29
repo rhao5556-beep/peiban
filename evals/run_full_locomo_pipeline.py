@@ -171,11 +171,7 @@ def generate_report(
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Complete LoCoMo Evaluation Pipeline")
-    p.add_argument(
-        "--backend_url",
-        default=os.environ.get("AFFINITY_EVAL_BACKEND_BASE_URL", "http://localhost:8000"),
-        help="Backend URL",
-    )
+    p.add_argument("--backend_url", default="http://localhost:8000", help="Backend URL")
     
     # Fix dataset path to be relative to project root
     project_root = Path(__file__).parent.parent
@@ -190,7 +186,7 @@ def main() -> int:
     p.add_argument("--no_llm", action="store_true", help="Disable LLM judge (exact match only)")
     p.add_argument("--api_key", default=os.environ.get("OPENAI_API_KEY"), help="API key for LLM judge")
     p.add_argument("--api_base", default=os.environ.get("OPENAI_API_BASE", "https://api.siliconflow.cn/v1"), help="API base URL")
-    p.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "Pro/deepseek-ai/DeepSeek-V3.2"), help="Judge model")
+    p.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "deepseek-ai/DeepSeek-V3"), help="Judge model")
     args = p.parse_args()
     
     print("="*60)

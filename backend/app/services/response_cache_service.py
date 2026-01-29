@@ -203,13 +203,13 @@ class ResponseCacheService:
         if self.redis:
             try:
                 cache_key = self._get_cache_key(message_type, affinity_state)
-                cached = await self.redis.get(cache_key)
+                cached = self.redis.get(cache_key)
                 
                 if cached:
                     data = json.loads(cached)
                     # 更新命中计数
                     data["hit_count"] = data.get("hit_count", 0) + 1
-                    await self.redis.setex(cache_key, self.ttl, json.dumps(data))
+                    self.redis.setex(cache_key, self.ttl, json.dumps(data))
                     
                     logger.info(f"Cache hit for {message_type}/{affinity_state}")
                     return data["response"]
@@ -276,7 +276,7 @@ class ResponseCacheService:
                 "created_at": datetime.now().isoformat(),
             }
             
-            await self.redis.setex(
+            self.redis.setex(
                 cache_key,
                 ttl or self.ttl,
                 json.dumps(data)

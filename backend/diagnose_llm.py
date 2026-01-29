@@ -13,7 +13,7 @@ async def test_llm_api():
     print("=" * 60)
     
     print(f"\nAPI Base: {settings.OPENAI_API_BASE}")
-    print(f"Model: {settings.OPENAI_MODEL}")
+    print(f"API Key: {settings.OPENAI_API_KEY[:20]}...")
     
     client = AsyncOpenAI(
         api_key=settings.OPENAI_API_KEY,
@@ -27,7 +27,7 @@ async def test_llm_api():
     
     try:
         response = await client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+            model="deepseek-ai/DeepSeek-V3",
             messages=[
                 {"role": "system", "content": "你是一个友好的 AI 助手。"},
                 {"role": "user", "content": test_message}

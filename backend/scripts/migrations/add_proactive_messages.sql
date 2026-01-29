@@ -38,7 +38,6 @@ CREATE TABLE IF NOT EXISTS user_proactive_preferences (
     quiet_hours_end TIME DEFAULT '08:00',
     max_daily_messages INTEGER DEFAULT 2,
     preferred_greeting_time TIME,
-    timezone VARCHAR(64) DEFAULT 'Asia/Shanghai',
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );

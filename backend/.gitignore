@@ -60,8 +60,7 @@ docker-compose.override.yml
 *.sqlite3
 
 # Celery
-celerybeat-schedule
-celerybeat-schedule.*
+celerybeat-schedule*
 celerybeat.pid
 
 # OS

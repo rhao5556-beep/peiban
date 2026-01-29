@@ -1,7 +1,6 @@
 """Celery Worker 模块"""
 from celery import Celery
 from celery.schedules import crontab
-from celery.signals import worker_process_shutdown
 from app.core.config import settings
 
 # 创建 Celery 应用
@@ -63,35 +62,11 @@ celery_app.conf.beat_schedule = {
         "schedule": 30,  # 30 seconds
         "options": {"queue": "default"}
     },
-
-    "outbox_requeue_stuck_processing": {
-        "task": "app.worker.tasks.outbox.requeue_stuck_processing_events",
-        "schedule": 60,
-        "options": {"queue": "maintenance"}
-    },
-
-    "outbox_reconcile_incomplete": {
-        "task": "app.worker.tasks.outbox.reconcile_incomplete_outbox_events",
-        "schedule": crontab(minute="*/10"),
-        "options": {"queue": "maintenance"}
-    },
     
     # 每小时清理过期幂等键
     "cleanup_idempotency_keys": {
         "task": "app.worker.tasks.consistency.cleanup_expired_keys",
         "schedule": crontab(minute=10),
-        "options": {"queue": "maintenance"}
-    },
-
-    "celerybeat_heartbeat": {
-        "task": "consistency.beat_heartbeat",
-        "schedule": 30,
-        "options": {"queue": "maintenance"}
-    },
-
-    "daily_session_cleanup": {
-        "task": "consistency.cleanup_stale_sessions",
-        "schedule": crontab(hour=4, minute=30),
         "options": {"queue": "maintenance"}
     },
     
@@ -147,17 +122,3 @@ celery_app.conf.task_routes = {
     "content.*": {"queue": "content"},  # 内容推荐任务队列
     "meme.*": {"queue": "meme"},  # 表情包任务队列
 }
-
-
-@worker_process_shutdown.connect
-def _close_worker_resources(**kwargs):
-    try:
-        from app.worker.tasks.outbox import close_sync_neo4j_driver as close_outbox_driver
-        close_outbox_driver()
-    except Exception:
-        pass
-    try:
-        from app.worker.tasks.decay import close_sync_neo4j_driver as close_decay_driver
-        close_decay_driver()
-    except Exception:
-        pass

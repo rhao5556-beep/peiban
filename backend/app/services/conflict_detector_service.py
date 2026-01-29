@@ -4,7 +4,6 @@
 import logging
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -29,19 +28,6 @@ class ConflictDetector:
         ("是", "不是"),
         ("有", "没有"),
     ]
-
-    _TOPIC_TRIGGER_WORDS = [
-        "喜欢", "不喜欢", "讨厌", "爱", "恨", "想要", "不想要", "需要", "不需要",
-        "来自", "住在", "生活在", "工作在", "工作于", "在",
-    ]
-
-    _CH_STOPWORDS = {
-        "这个", "那个", "这些", "那些", "真的", "其实", "感觉", "可能", "应该",
-        "今天", "昨天", "明天", "最近", "一直", "有点", "非常", "特别",
-        "因为", "所以", "但是", "而且", "并且", "同时", "如果", "的话",
-        "我们", "你们", "他们", "她们", "它们", "自己", "以及",
-        "我", "你", "他", "她", "它", "人", "东西",
-    }
     
     def detect_conflicts(
         self,
@@ -104,11 +90,11 @@ class ConflictDetector:
         if not has_opposite:
             return None
         
-        topics1 = self._extract_topics(content1)
-        topics2 = self._extract_topics(content2)
-        common_topics = topics1 & topics2
-
-        if not common_topics:
+        # 检查主题是否相同（简化版：检查是否有共同关键词）
+        # 更精确的实现应该使用 NER 提取实体
+        common_keywords = self._extract_common_keywords(content1, content2)
+        
+        if not common_keywords:
             return None
         
         # 判断哪个更新
@@ -123,48 +109,33 @@ class ConflictDetector:
             "memory_2": mem2,
             "conflict_type": "opposite",
             "opposite_pair": opposite_pair,
-            "common_topic": sorted(common_topics),
-            "confidence": self._estimate_confidence(opposite_pair, topics1, topics2),
+            "common_topic": list(common_keywords),
+            "confidence": 0.9,  # 简化版，固定置信度
             "newer_memory": newer_memory,
             "older_memory": older_memory,
             "time_diff_days": abs((time1 - time2).days) if time1 and time2 else 0
         }
     
-    def _extract_topics(self, text: str) -> set[str]:
-        if not text:
-            return set()
-
-        topics: set[str] = set()
-
-        for m in re.finditer(
-            r"(喜欢|不喜欢|讨厌|爱|恨|想要|不想要|需要|不需要|来自|住在|生活在|工作在|工作于|在)\s*(?P<obj>[^\n，。！？!?;；,]{1,24})",
-            text,
-        ):
-            obj = (m.group("obj") or "").strip()
-            obj = re.sub(r"^(吃|喝|玩|看|听|做|去|学|练|跑|打|写)\s*", "", obj)
-            obj = re.sub(r"\s+", "", obj)
-            obj = re.sub(r"[\"'“”‘’]+", "", obj)
-            if obj and obj not in self._CH_STOPWORDS and len(obj) <= 24:
-                topics.add(obj)
-
-        for token in re.findall(r"[\u4e00-\u9fff]{2,8}", text):
-            if token not in self._CH_STOPWORDS:
-                topics.add(token)
-
-        for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,24}", text):
-            token_l = token.lower()
-            if token_l not in {"like", "dislike"}:
-                topics.add(token_l)
-
-        return topics
-
-    def _estimate_confidence(self, opposite_pair: Tuple[str, str], topics1: set[str], topics2: set[str]) -> float:
-        if not topics1 or not topics2:
-            return 0.6
-        common = topics1 & topics2
-        overlap = len(common) / max(len(topics1), len(topics2), 1)
-        base = 0.75 if opposite_pair else 0.6
-        return max(0.5, min(0.95, base + overlap * 0.25))
+    def _extract_common_keywords(
+        self,
+        text1: str,
+        text2: str
+    ) -> set:
+        """
+        提取两段文本的共同关键词
+        
+        简化版：提取名词（茶、咖啡、电影等）
+        """
+        # 常见名词列表（简化版）
+        common_nouns = [
+            "茶", "咖啡", "电影", "音乐", "书", "运动", "旅游",
+            "美食", "游戏", "工作", "学习", "朋友", "家人"
+        ]
+        
+        keywords1 = {word for word in common_nouns if word in text1}
+        keywords2 = {word for word in common_nouns if word in text2}
+        
+        return keywords1 & keywords2
     
     def generate_clarification_prompt(
         self,

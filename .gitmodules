@@ -1,0 +1,18 @@
+[submodule "external/anthropics-skills"]
+	path = external/anthropics-skills
+	url = https://github.com/anthropics/skills.git
+[submodule "external/everything-claude-code"]
+	path = external/everything-claude-code
+	url = https://github.com/affaan-m/everything-claude-code.git
+[submodule "external/KnowMeBench"]
+	path = external/KnowMeBench
+	url = https://github.com/QuantaAlpha/KnowMeBench.git
+[submodule "external/planning-with-files"]
+	path = external/planning-with-files
+	url = https://github.com/OthmanAdi/planning-with-files.git
+[submodule "external/superpowers"]
+	path = external/superpowers
+	url = https://github.com/obra/superpowers.git
+[submodule "external/openai-evals"]
+	path = external/openai-evals
+	url = https://github.com/openai/evals.git

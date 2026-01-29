@@ -114,8 +114,6 @@ async def get_affinity(
 @router.get("/history", response_model=List[AffinityHistory])
 async def get_affinity_history(
     days: int = Query(30, le=365),
-    limit: int = Query(200, ge=1, le=500),
-    offset: int = Query(0, ge=0, le=100000),
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -124,7 +122,7 @@ async def get_affinity_history(
     
     try:
         affinity_service = AffinityService(db_session=db)
-        history = await affinity_service.get_affinity_history(user_id, days, limit=limit, offset=offset)
+        history = await affinity_service.get_affinity_history(user_id, days)
         
         return [
             AffinityHistory(

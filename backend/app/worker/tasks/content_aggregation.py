@@ -18,14 +18,17 @@ logger = logging.getLogger(__name__)
 
 
 def run_async(coro):
+    """
+    统一的异步任务执行器，避免事件循环冲突
+    
+    在 Celery 任务中调用异步代码时使用此函数
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        return asyncio.run(coro)
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 @celery_app.task(name="content.fetch_daily", bind=True, max_retries=3)
@@ -37,16 +40,6 @@ def fetch_daily_content(self):
     功能：从所有配置的来源抓取内容并保存到数据库
     """
     try:
-        try:
-            import redis
-            from app.core.config import settings
-
-            r = redis.from_url(settings.REDIS_URL, decode_responses=True)
-            acquired = r.set("locks:content:fetch_daily", datetime.utcnow().isoformat(), nx=True, ex=3 * 3600)
-            if not acquired:
-                return {"status": "skipped", "reason": "locked"}
-        except Exception:
-            pass
         return run_async(_fetch_daily_content_async())
     except Exception as e:
         logger.error(f"Daily content fetch failed: {e}")
@@ -122,16 +115,6 @@ def cleanup_old_content(self):
     保留策略：7 天内的内容
     """
     try:
-        try:
-            import redis
-            from app.core.config import settings
-
-            r = redis.from_url(settings.REDIS_URL, decode_responses=True)
-            acquired = r.set("locks:content:cleanup_old", datetime.utcnow().isoformat(), nx=True, ex=3 * 3600)
-            if not acquired:
-                return {"status": "skipped", "reason": "locked"}
-        except Exception:
-            pass
         return run_async(_cleanup_old_content_async())
     except Exception as e:
         logger.error(f"Content cleanup failed: {e}")
@@ -148,10 +131,8 @@ async def _cleanup_old_content_async():
         try:
             result = await db.execute(
                 text("""
-                    UPDATE content_library
-                    SET is_active = FALSE
+                    DELETE FROM content_library
                     WHERE fetched_at < :cutoff_date
-                      AND is_active = TRUE
                     RETURNING id
                 """),
                 {"cutoff_date": cutoff_date}
@@ -161,11 +142,11 @@ async def _cleanup_old_content_async():
             deleted_ids = result.fetchall()
             count = len(deleted_ids)
             
-            logger.info(f"Archived {count} old contents (older than {cutoff_date})")
+            logger.info(f"Cleaned up {count} old contents (older than {cutoff_date})")
             
             return {
                 "status": "success",
-                "archived": count,
+                "deleted": count,
                 "cutoff_date": cutoff_date.isoformat(),
                 "timestamp": datetime.now().isoformat()
             }

@@ -1,28 +1,23 @@
 """对话端点"""
 from typing import Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from datetime import datetime
 import uuid
 import logging
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user
-from app.core.database import (
-    get_db,
-    get_neo4j_driver,
-    get_milvus_collection,
-    get_redis_client,
-    milvus_connected,
-)
+from app.core.database import get_db, get_neo4j_driver, get_milvus_collection
 from app.core.ids import normalize_uuid
 from app.models.session import Session, ConversationTurn
 from app.services.conversation_service import ConversationService, ConversationMode
 from app.services.affinity_service import AffinityService
 from app.services.retrieval_service import RetrievalService
 from app.services.graph_service import GraphService
-from app.services.outbox_service import TransactionManager, IdempotencyChecker
+from app.services.outbox_service import TransactionManager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -35,6 +30,7 @@ class MessageRequest(BaseModel):
     idempotency_key: Optional[str] = None
     mode: Literal["graph_only", "hybrid"] = "hybrid"  # 对话模式
     eval_mode: bool = False
+    memorize_only: bool = False
 
 
 class MessageResponse(BaseModel):
@@ -50,7 +46,9 @@ class MessageResponse(BaseModel):
     memory_status: str = "pending"  # pending, committed
     mode: str = "hybrid"  # graph_only 或 hybrid
     context_source: Optional[dict] = None  # 上下文来源追踪
-    error_id: Optional[str] = None  # 仅在服务端异常降级时填充，便于定位日志
+    error_code: Optional[str] = None
+    trace_id: Optional[str] = None
+    error_type: Optional[str] = None
 
 
 class SessionResponse(BaseModel):
@@ -79,6 +77,17 @@ async def send_message(
     try:
         session_uuid = uuid.UUID(session_id)
         user_uuid = uuid.UUID(user_id)
+        await db.execute(
+            text(
+                """
+                INSERT INTO users (id, created_at)
+                VALUES (:user_id, NOW())
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {"user_id": user_id},
+        )
+        await db.commit()
         session_row = (
             await db.execute(select(Session).where(Session.id == session_uuid))
         ).scalar_one_or_none()
@@ -88,25 +97,21 @@ async def send_message(
 
         # 初始化服务
         neo4j_driver = get_neo4j_driver()
-        milvus_collection = get_milvus_collection() if milvus_connected else None
-        redis_client = get_redis_client()
+        milvus_collection = get_milvus_collection()
         
         graph_service = GraphService(neo4j_driver=neo4j_driver)
         retrieval_service = RetrievalService(
             milvus_client=milvus_collection,
             graph_service=graph_service,
-            db_session=db
+            db_session=db,
         )
-        affinity_service = AffinityService(db_session=db)
-        transaction_manager = TransactionManager(db_session=db)
-        idempotency_checker = IdempotencyChecker(redis_client=redis_client)
+        affinity_service = AffinityService()
         
         conversation_service = ConversationService(
             affinity_service=affinity_service,
             retrieval_service=retrieval_service,
             graph_service=graph_service,
-            transaction_manager=transaction_manager,
-            idempotency_checker=idempotency_checker
+            transaction_manager=TransactionManager(db_session=db),
         )
         
         # 调用对话服务（传递 mode 参数实现物理隔离）
@@ -115,8 +120,9 @@ async def send_message(
             message=request.message,
             session_id=session_id,
             mode=request.mode,  # graph_only 或 hybrid
-            eval_mode=request.eval_mode,
-            idempotency_key=request.idempotency_key
+            eval_mode=bool(request.eval_mode),
+            memorize_only=bool(request.memorize_only),
+            idempotency_key=request.idempotency_key,
         )
         
         return MessageResponse(
@@ -134,14 +140,24 @@ async def send_message(
         )
         
     except Exception as e:
-        error_id = str(uuid.uuid4())
+        trace_id = str(uuid.uuid4())
         logger.error(
-            f"Conversation processing failed: error_id={error_id}, user_id={user_id}, session_id={session_id}, mode={request.mode}, err={e}",
-            exc_info=True
+            f"Conversation processing failed trace_id={trace_id}: {e}",
+            exc_info=True,
         )
-        # 降级响应
+        if request.eval_mode:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error_code": "CONVERSATION_FAILED",
+                    "trace_id": trace_id,
+                    "error_type": e.__class__.__name__,
+                    "message": "conversation_failed",
+                },
+                headers={"X-Trace-Id": trace_id},
+            )
         return MessageResponse(
-            reply=f"抱歉，处理消息时出现了问题。请稍后再试。",
+            reply="抱歉，处理消息时出现了问题。请稍后再试。",
             session_id=session_id,
             turn_id=str(uuid.uuid4()),
             emotion={"primary_emotion": "neutral", "valence": 0.0, "confidence": 0.5},
@@ -150,9 +166,9 @@ async def send_message(
             tone_type="friendly",
             response_time_ms=0,
             memory_status="error",
-            mode=request.mode,
-            context_source={"mode": request.mode, "cached": False},
-            error_id=error_id
+            error_code="CONVERSATION_FAILED",
+            trace_id=trace_id,
+            error_type=e.__class__.__name__,
         )
 
 

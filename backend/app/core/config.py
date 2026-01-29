@@ -38,38 +38,17 @@ class Settings(BaseSettings):
     JWT_SECRET: str = "your-secret-key-change-in-production"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
-    JWT_REFRESH_EXPIRE_DAYS: int = 14
-
-    TOKEN_ISSUE_SECRET: str = ""
-    AUTH_ALLOW_CLIENT_USER_ID: bool = False
-    ALLOW_LOCAL_TOKEN_ISSUE: bool = True
-    AUTH_SESSION_SECRET: str = ""
-    AUTH_SESSION_COOKIE_NAME: str = "affinity_aid"
-    AUTH_SESSION_COOKIE_MAX_AGE_DAYS: int = 90
-
-    JSON_FIELD_MAX_BYTES: int = 65536
-    OUTBOX_PAYLOAD_MAX_BYTES: int = 1048576
     
     # LLM 配置 (支持 OpenAI 兼容 API，如硅基流动)
     OPENAI_API_KEY: str = ""
     OPENAI_API_BASE: str = "https://api.siliconflow.cn/v1"  # 硅基流动 API
-    OPENAI_MODEL: str = "Pro/deepseek-ai/DeepSeek-V3.2"  # 默认模型
+    OPENAI_MODEL: str = "deepseek-ai/DeepSeek-V3"  # 默认模型
 
     # 网络/模型调用超时（秒）
     LLM_REQUEST_TIMEOUT_S: float = 30.0
     EMBEDDING_REQUEST_TIMEOUT_S: float = 20.0
     ENTITY_EXTRACTION_TIMEOUT_S: float = 0.8
     ENTITY_EXTRACTION_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
-
-    # 评测/回放 transcript ingest（graph_only + eval_mode）配置
-    EVAL_TRANSCRIPT_CHUNK_LINES: int = 8
-    EVAL_STRICT_DEPENDENCIES: bool = True
-    EVAL_REQUIRE_MILVUS: bool = true 
-    EVAL_GRAPH_CONTEXT_ENTITIES_TIMEOUT_S: float = 3.0
-    EVAL_GRAPH_EXTRACT_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
-    EVAL_GRAPH_EXTRACT_TIMEOUT_S: float = 45.0
-    EVAL_GRAPH_EXTRACT_MAX_RETRIES: int = 2
-    EVAL_GRAPH_WRITE_NEO4J_TIMEOUT_S: float = 30.0
 
     # 图谱事实检索降级配置
     GRAPH_FACTS_ENABLED: bool = True
@@ -92,7 +71,6 @@ class Settings(BaseSettings):
     # Outbox 配置
     OUTBOX_MAX_RETRIES: int = 5
     OUTBOX_BACKOFF_BASE: int = 2
-    OUTBOX_PROCESSING_TIMEOUT_S: int = 300
     
     # SLO 配置
     SLO_MEDIAN_LAG_MS: int = 2000
@@ -129,7 +107,6 @@ class Settings(BaseSettings):
     CONTENT_LIBRARY_IN_CONVERSATION_MAX_ITEMS: int = 2
     CONTENT_LIBRARY_IN_CONVERSATION_TIMEOUT_MS: int = 150
     
-
 @lru_cache()
 def get_settings() -> Settings:
     """获取配置单例"""

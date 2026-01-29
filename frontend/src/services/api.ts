@@ -13,20 +13,34 @@ const API_BASE_URL = 'http://localhost:8000/api/v1';
 
 // 3. 动态获取 Token
 let cachedToken: string | null = null;
+let cachedUserId: string | null = null;
+
+// 从 localStorage 恢复 user_id
+const STORAGE_KEY = 'affinity_user_id';
+const storedUserId = localStorage.getItem(STORAGE_KEY);
+if (storedUserId) {
+  cachedUserId = storedUserId;
+}
 
 const getToken = async (): Promise<string> => {
   if (cachedToken) return cachedToken;
   
   try {
+    // 只有当 cachedUserId 有值时才发送 user_id
+    const body = cachedUserId ? { user_id: cachedUserId } : {};
     const response = await fetch(`${API_BASE_URL}/auth/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({})
+      body: JSON.stringify(body)
     });
     if (response.ok) {
       const data = await response.json();
       cachedToken = data.access_token;
+      // 保存 user_id 到 localStorage
+      if (data.user_id && !cachedUserId) {
+        cachedUserId = data.user_id;
+        localStorage.setItem(STORAGE_KEY, data.user_id);
+      }
       return cachedToken;
     }
   } catch (e) {

@@ -67,7 +67,7 @@ async def analyze_latency():
     
     t0 = time.time()
     response = await llm_client.chat.completions.create(
-        model=settings.OPENAI_MODEL,
+        model="deepseek-ai/DeepSeek-V3",
         messages=[
             {"role": "system", "content": "你是一个情感陪伴 AI"},
             {"role": "user", "content": question}

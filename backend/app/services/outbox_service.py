@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
-
 logger = logging.getLogger(__name__)
 
 
@@ -19,7 +17,7 @@ class OutboxEvent:
     event_id: str
     memory_id: str
     payload: Dict[str, Any]
-    status: str  # pending, processing, done, failed, dlq, pending_review
+    status: str  # pending, processing, done, failed
     retry_count: int
     idempotency_key: Optional[str]
     created_at: datetime
@@ -48,7 +46,9 @@ class TransactionManager:
         valence: float,
         conversation_id: str,
         idempotency_key: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        skip_llm_extraction: bool = False,
+        process_inline: bool = False,
+        anchor_dt: Optional[datetime] = None,
         entities: List[Dict] = None,
         edges: List[Dict] = None
     ) -> Tuple[str, str]:
@@ -84,7 +84,7 @@ class TransactionManager:
             "embedding": embedding,
             "valence": valence,
             "conversation_id": conversation_id,
-            "metadata": metadata or {},
+            "skip_llm_extraction": bool(skip_llm_extraction),
             "entities": entities or [],
             "edges": edges or []
         }
@@ -92,26 +92,16 @@ class TransactionManager:
         if not self.db:
             logger.warning("No database session, returning mock IDs")
             return memory_id, event_id
-
-        payload_json = json.dumps(payload, ensure_ascii=False)
-        if len(payload_json.encode("utf-8")) > settings.OUTBOX_PAYLOAD_MAX_BYTES:
-            raise ValueError("Outbox payload too large")
         
         try:
             # 在同一个事务中执行两个 INSERT
             # 1. 写入 pending 状态的 memory
             # 将 embedding list 转换为 pgvector 格式的字符串
-            embedding_str = None
-            if embedding:
-                if len(embedding) < 1024:
-                    embedding = embedding + [0.0] * (1024 - len(embedding))
-                elif len(embedding) > 1024:
-                    embedding = embedding[:1024]
-                embedding_str = str(embedding)
+            embedding_str = str(embedding) if embedding else None
             await self.db.execute(
                 text("""
-                    INSERT INTO memories (id, user_id, content, embedding, valence, status, conversation_id, metadata, created_at)
-                    VALUES (:id, :user_id, :content, :embedding, :valence, 'pending', :conversation_id, :metadata, NOW())
+                    INSERT INTO memories (id, user_id, content, embedding, valence, status, conversation_id, created_at)
+                    VALUES (:id, :user_id, :content, :embedding, :valence, 'pending', :conversation_id, NOW())
                 """),
                 {
                     "id": memory_id,
@@ -119,8 +109,7 @@ class TransactionManager:
                     "content": content,
                     "embedding": embedding_str,
                     "valence": valence,
-                    "conversation_id": conversation_id,
-                    "metadata": json.dumps(metadata or {})
+                    "conversation_id": conversation_id
                 }
             )
             
@@ -134,7 +123,7 @@ class TransactionManager:
                     "id": str(uuid.uuid4()),
                     "event_id": event_id,
                     "memory_id": memory_id,
-                    "payload": payload_json,
+                    "payload": json.dumps(payload),
                     "idempotency_key": idempotency_key
                 }
             )
@@ -142,94 +131,60 @@ class TransactionManager:
             # 提交事务
             await self.db.commit()
             logger.info(f"Created memory {memory_id} with outbox event {event_id}")
-            
+
+            if bool(process_inline):
+                from app.services.structured_fact_extractor import augment_ir_with_structured_facts
+                from app.worker.tasks.outbox import write_ir_to_neo4j, write_to_milvus_sync
+
+                ir = {"entities": [], "relations": [], "metadata": {"source": "deterministic", "model_version": "inline"}}
+                ir = augment_ir_with_structured_facts(
+                    ir,
+                    content or "",
+                    anchor_dt=anchor_dt,
+                    timezone="UTC",
+                    default_event_id=f"event_{memory_id}",
+                    default_event_name=(content or "事件")[:20],
+                )
+
+                write_to_milvus_sync(
+                    memory_id=memory_id,
+                    user_id=user_id,
+                    content=content,
+                    embedding=embedding,
+                    valence=valence,
+                )
+                write_ir_to_neo4j(
+                    user_id=user_id,
+                    entities=ir.get("entities") or [],
+                    relations=ir.get("relations") or [],
+                    metadata=ir.get("metadata") or {},
+                    conversation_id=conversation_id,
+                )
+
+                await self.db.execute(
+                    text("""
+                        UPDATE outbox_events
+                        SET status = 'done', processed_at = NOW()
+                        WHERE event_id = :event_id
+                    """),
+                    {"event_id": event_id},
+                )
+                await self.db.execute(
+                    text("""
+                        UPDATE memories
+                        SET status = 'committed', committed_at = NOW()
+                        WHERE id = :id
+                    """),
+                    {"id": memory_id},
+                )
+                await self.db.commit()
+
             return memory_id, event_id
             
         except Exception as e:
             # 回滚事务
             await self.db.rollback()
             logger.error(f"Transaction failed, rolled back: {e}")
-            raise
-
-    async def create_committed_memory(
-        self,
-        user_id: str,
-        content: str,
-        embedding: List[float],
-        valence: float,
-        conversation_id: str,
-        idempotency_key: str,
-        metadata: Optional[Dict[str, Any]] = None,
-        entities: List[Dict] = None,
-        edges: List[Dict] = None
-    ) -> Tuple[str, str]:
-        memory_id = str(uuid.uuid4())
-        event_id = str(uuid.uuid4())
-
-        payload = {
-            "memory_id": memory_id,
-            "user_id": user_id,
-            "content": content,
-            "embedding": embedding,
-            "valence": valence,
-            "conversation_id": conversation_id,
-            "metadata": metadata or {},
-            "entities": entities or [],
-            "edges": edges or []
-        }
-
-        if not self.db:
-            logger.warning("No database session, returning mock IDs")
-            return memory_id, event_id
-
-        payload_json = json.dumps(payload, ensure_ascii=False)
-        if len(payload_json.encode("utf-8")) > settings.OUTBOX_PAYLOAD_MAX_BYTES:
-            raise ValueError("Outbox payload too large")
-
-        embedding_str = None
-        if embedding:
-            if len(embedding) < 1024:
-                embedding = embedding + [0.0] * (1024 - len(embedding))
-            elif len(embedding) > 1024:
-                embedding = embedding[:1024]
-            embedding_str = str(embedding)
-
-        try:
-            await self.db.execute(
-                text("""
-                    INSERT INTO memories (id, user_id, content, embedding, valence, status, conversation_id, metadata, created_at, committed_at)
-                    VALUES (:id, :user_id, :content, :embedding, :valence, 'committed', :conversation_id, :metadata, NOW(), NOW())
-                """),
-                {
-                    "id": memory_id,
-                    "user_id": user_id,
-                    "content": content,
-                    "embedding": embedding_str,
-                    "valence": valence,
-                    "conversation_id": conversation_id,
-                    "metadata": json.dumps(metadata or {})
-                }
-            )
-
-            await self.db.execute(
-                text("""
-                    INSERT INTO outbox_events (id, event_id, memory_id, payload, status, idempotency_key, created_at, processed_at)
-                    VALUES (:id, :event_id, :memory_id, :payload, 'done', :idempotency_key, NOW(), NOW())
-                """),
-                {
-                    "id": str(uuid.uuid4()),
-                    "event_id": event_id,
-                    "memory_id": memory_id,
-                    "payload": payload_json,
-                    "idempotency_key": idempotency_key
-                }
-            )
-
-            await self.db.commit()
-            return memory_id, event_id
-        except Exception as e:
-            await self.db.rollback()
-            logger.error(f"Committed memory transaction failed, rolled back: {e}")
             raise
     
     async def mark_event_processing(self, event_id: str) -> bool:
@@ -240,7 +195,7 @@ class TransactionManager:
         result = await self.db.execute(
             text("""
                 UPDATE outbox_events 
-                SET status = 'processing', processing_started_at = NOW()
+                SET status = 'processing'
                 WHERE event_id = :event_id AND status = 'pending'
                 RETURNING id
             """),
@@ -257,7 +212,7 @@ class TransactionManager:
         await self.db.execute(
             text("""
                 UPDATE outbox_events 
-                SET status = 'done', processed_at = NOW(), processing_started_at = NULL
+                SET status = 'done', processed_at = NOW()
                 WHERE event_id = :event_id
             """),
             {"event_id": event_id}
@@ -273,7 +228,7 @@ class TransactionManager:
         await self.db.execute(
             text("""
                 UPDATE outbox_events 
-                SET status = 'failed', error_message = :error_message, processing_started_at = NULL
+                SET status = 'failed', error_message = :error_message
                 WHERE event_id = :event_id
             """),
             {"event_id": event_id, "error_message": error_message}
@@ -289,7 +244,7 @@ class TransactionManager:
         result = await self.db.execute(
             text("""
                 UPDATE outbox_events 
-                SET retry_count = retry_count + 1, status = 'pending', processing_started_at = NULL
+                SET retry_count = retry_count + 1, status = 'pending'
                 WHERE event_id = :event_id
                 RETURNING retry_count
             """),

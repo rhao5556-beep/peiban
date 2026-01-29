@@ -65,13 +65,10 @@ CREATE TABLE outbox_events (
     event_id VARCHAR(64) UNIQUE NOT NULL,
     memory_id UUID REFERENCES memories(id) ON DELETE CASCADE,
     payload JSONB NOT NULL,
-    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'done', 'failed', 'dlq', 'pending_review')),
+    status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'done', 'failed', 'dlq')),
     retry_count INT DEFAULT 0,
     idempotency_key VARCHAR(64),
     created_at TIMESTAMP DEFAULT NOW(),
-    processing_started_at TIMESTAMP,
-    milvus_written_at TIMESTAMP,
-    neo4j_written_at TIMESTAMP,
     processed_at TIMESTAMP,
     error_message TEXT
 );
@@ -112,7 +109,6 @@ CREATE TABLE idempotency_keys (
 
 -- 索引
 CREATE INDEX idx_outbox_status ON outbox_events(status) WHERE status = 'pending';
-CREATE INDEX idx_outbox_processing_started_at ON outbox_events(processing_started_at) WHERE status = 'processing';
 CREATE INDEX idx_outbox_idempotency ON outbox_events(idempotency_key);
 CREATE INDEX idx_memories_status ON memories(status);
 CREATE INDEX idx_memories_user ON memories(user_id);
@@ -120,7 +116,6 @@ CREATE INDEX idx_idempotency_expires ON idempotency_keys(expires_at);
 CREATE INDEX idx_sessions_user ON sessions(user_id);
 CREATE INDEX idx_turns_session ON conversation_turns(session_id);
 CREATE INDEX idx_affinity_user ON affinity_history(user_id);
-CREATE INDEX idx_affinity_user_created_at ON affinity_history(user_id, created_at DESC);
 
 -- 创建更新时间触发器
 CREATE OR REPLACE FUNCTION update_updated_at_column()
