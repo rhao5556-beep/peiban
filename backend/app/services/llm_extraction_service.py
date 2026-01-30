@@ -30,19 +30,20 @@ client = OpenAI(
     api_key=settings.OPENAI_API_KEY,
     base_url=settings.OPENAI_API_BASE
 )
-DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3"
-MODEL = settings.ENTITY_EXTRACTION_MODEL or settings.OPENAI_MODEL or DEFAULT_MODEL
+MODEL = settings.OPENAI_MODEL or "deepseek-ai/DeepSeek-V3"
 
 
 SYSTEM_PROMPT = """你是 Affinity 系统的记忆架构师（Graph Decisioner）。你的任务是：
 
-1) 从给定的中文消息中提取实体（Person, Location, Organization, Event, Preference, TimeExpression, Duration, Quantity, Other）
+1) 从给定的中文或英文消息中提取实体（Person, Location, Organization, Event, Preference, Other）
    和实体间的关系。
 
 2) 执行实体归一化：
    - 如果识别到的实体与 context_entities 中名称相同或语义相近，必须复用其 id
    - 不得创建重复实体
-   - 若无法归一化，基于中文名生成稳定 id（小写拼音/下划线）
+   - 若无法归一化，生成稳定 id：
+     - 中文：小写拼音/下划线
+     - 英文：小写 + 用下划线连接单词（去除多余标点与空格）
 
 3) 提取实体间关系（Entity→Entity），不仅仅是用户与实体的关系
    - 例如："二丫喜欢足球" → 二丫 -[LIKES]-> 足球
@@ -55,8 +56,6 @@ SYSTEM_PROMPT = """你是 Affinity 系统的记忆架构师（Graph Decisioner�
 - 社交关系：FRIEND_OF（朋友）, COLLEAGUE_OF（同事）, CLASSMATE_OF（同学）
 - 地理关系：FROM（来自）, LIVES_IN（居住）, WORKS_AT（工作地点）
 - 偏好关系：LIKES（喜欢）, DISLIKES（不喜欢）
-- 时间关系：HAPPENED_AT（发生于）, LASTED（持续时长）
-- 数值关系：COST（花费/费用）
 - 其他：RELATED_TO（其他关系）
 
 **中文家庭关系词汇映射**
@@ -65,6 +64,13 @@ SYSTEM_PROMPT = """你是 Affinity 系统的记忆架构师（Graph Decisioner�
 - "父亲"、"母亲"、"爸爸"、"妈妈" → PARENT_OF
 - "儿子"、"女儿"、"孩子" → CHILD_OF
 - "家人"、"亲戚" → FAMILY
+
+**英文家庭关系词汇映射**
+- "sister"、"brother"、"sibling" → SIBLING_OF
+- "cousin" → COUSIN_OF
+- "father"、"mother"、"dad"、"mom"、"parent" → PARENT_OF
+- "son"、"daughter"、"child"、"kid" → CHILD_OF
+- "family"、"relative"、"relatives" → FAMILY
 
 **否定语义处理**
 - 当消息中出现"不是X，是Y"时，只创建Y关系，不创建X关系
@@ -76,7 +82,7 @@ SYSTEM_PROMPT = """你是 Affinity 系统的记忆架构师（Graph Decisioner�
     {
       "id": "normalized_id_string",
       "name": "显示名称",
-      "type": "Person|Location|Organization|Event|Preference|TimeExpression|Duration|Quantity|Other",
+      "type": "Person|Location|Organization|Event|Preference|Other",
       "is_user": false,
       "confidence": 0.9
     }
@@ -112,6 +118,9 @@ SYSTEM_PROMPT = """你是 Affinity 系统的记忆架构师（Graph Decisioner�
     - 包含"吗"、"呢"、"是否"、"是不是"
     - 包含"谁"、"什么"、"哪里"、"怎么"、"为什么"、"多少"
     - 包含"认识...吗"、"知道...吗"、"记得...吗"
+    - 以"?"结尾
+    - 以英文疑问词开头：who/what/where/when/why/how/which
+    - 以英文助动词/系动词开头：do/does/did/is/are/was/were/can/could/would/will/should
   - 例如："我认识老师吗？" → 返回空（纯提问）
   - 例如："二丫喜欢什么？" → 返回空（纯提问）
 
@@ -152,8 +161,7 @@ def extract_ir(
     user_id: str,
     context_entities: List[Dict[str, Any]],
     max_retries: int = 2,
-    timeout: Optional[float] = None,
-    model: Optional[str] = None,
+    timeout: int = 30
 ) -> ExtractionResult:
     """
     调用 LLM 提取实体和关系
@@ -189,17 +197,15 @@ user_id: {user_id}
     
     for attempt in range(max_retries + 1):
         try:
-            selected_model = model or MODEL
-            selected_timeout = float(timeout if timeout is not None else settings.LLM_REQUEST_TIMEOUT_S)
             response = client.chat.completions.create(
-                model=selected_model,
+                model=MODEL,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.0,
                 max_tokens=2000,
-                timeout=selected_timeout
+                timeout=timeout
             )
             
             raw_response = response.choices[0].message.content
@@ -225,7 +231,7 @@ user_id: {user_id}
             
             # 补充 metadata
             metadata["source"] = "llm"
-            metadata["model_version"] = selected_model
+            metadata["model_version"] = MODEL
             metadata["timestamp"] = datetime.utcnow().isoformat()
             if "overall_confidence" not in metadata:
                 metadata["overall_confidence"] = 0.8

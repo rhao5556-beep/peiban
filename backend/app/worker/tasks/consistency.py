@@ -134,9 +134,9 @@ async def _check_milvus_consistency(memory_ids: List[str]) -> List[str]:
         collection = get_milvus_collection()
         
         # 查询存在的 ID
-        expr = f'id in {memory_ids}'
-        results = collection.query(expr=expr, output_fields=["id"])
-        existing_ids = set(str(r["id"]) for r in results)
+        expr = f'entity_id in {memory_ids}'
+        results = collection.query(expr=expr, output_fields=["entity_id"])
+        existing_ids = set(r["entity_id"] for r in results)
         
         missing = [mid for mid in memory_ids if mid not in existing_ids]
         

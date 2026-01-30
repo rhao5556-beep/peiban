@@ -17,10 +17,10 @@
 
 ## 1. OPENAI_API_KEY - 硅基流动 API Key
 
-### ✅ 示例配置（请把真实值放到 `.env`，不要提交到 Git）
+### ✅ 当前配置（已正确）
 
 ```env
-OPENAI_API_KEY=sk-your-siliconflow-api-key-here
+OPENAI_API_KEY=sk-REPLACE_WITH_YOUR_KEY
 OPENAI_API_BASE=https://api.siliconflow.cn/v1
 OPENAI_MODEL=Pro/deepseek-ai/DeepSeek-V3.2
 ```
@@ -82,7 +82,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 ```env
 # 生成的随机密钥（示例）
-JWT_SECRET=your-strong-jwt-secret-change-in-production
+JWT_SECRET=nlNLbV62eKjedCT3tOacNEVE13cBRC25I61KtQcTMiw
 ```
 
 **⚠️ 重要**: 
@@ -200,12 +200,12 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 
 ```env
 # OpenAI 配置（已正确）
-OPENAI_API_KEY=sk-your-siliconflow-api-key-here
+OPENAI_API_KEY=sk-REPLACE_WITH_YOUR_KEY
 OPENAI_API_BASE=https://api.siliconflow.cn/v1
 OPENAI_MODEL=deepseek-ai/DeepSeek-V3
 
 # JWT 密钥（需要替换为生成的随机字符串）
-JWT_SECRET=your-strong-jwt-secret-change-in-production
+JWT_SECRET=nlNLbV62eKjedCT3tOacNEVE13cBRC25I61KtQcTMiw
 
 # 以下配置不需要（可以删除或留空）
 # WEIBO_API_KEY=

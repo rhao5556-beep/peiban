@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # 允许的实体类型
 ALLOWED_ENTITY_TYPES = {
     "Person", "Location", "Organization", 
-    "Event", "Preference", "TimeExpression", "Duration", "Quantity", "Other"
+    "Event", "Preference", "Other"
 }
 
 # 允许的关系类型
@@ -35,10 +35,6 @@ ALLOWED_RELATION_TYPES = {
     "FROM", "LIVES_IN", "WORKS_AT",
     # 偏好关系
     "LIKES", "DISLIKES",
-    # 时间关系
-    "HAPPENED_AT", "LASTED",
-    # 数值关系
-    "COST",
     # 其他
     "RELATED_TO"
 }

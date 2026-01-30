@@ -147,7 +147,8 @@ async def _delete_from_milvus(memory_ids: List[str]) -> int:
         
         collection = get_milvus_collection()
         
-        expr = f'id in {memory_ids}'
+        # Milvus 使用 entity_id 字段存储 memory_id
+        expr = f'entity_id in {memory_ids}'
         result = collection.delete(expr)
         deleted_count = result.delete_count if hasattr(result, 'delete_count') else len(memory_ids)
         

@@ -46,9 +46,6 @@ class TransactionManager:
         valence: float,
         conversation_id: str,
         idempotency_key: str,
-        skip_llm_extraction: bool = False,
-        process_inline: bool = False,
-        anchor_dt: Optional[datetime] = None,
         entities: List[Dict] = None,
         edges: List[Dict] = None
     ) -> Tuple[str, str]:
@@ -84,7 +81,6 @@ class TransactionManager:
             "embedding": embedding,
             "valence": valence,
             "conversation_id": conversation_id,
-            "skip_llm_extraction": bool(skip_llm_extraction),
             "entities": entities or [],
             "edges": edges or []
         }
@@ -131,54 +127,7 @@ class TransactionManager:
             # 提交事务
             await self.db.commit()
             logger.info(f"Created memory {memory_id} with outbox event {event_id}")
-
-            if bool(process_inline):
-                from app.services.structured_fact_extractor import augment_ir_with_structured_facts
-                from app.worker.tasks.outbox import write_ir_to_neo4j, write_to_milvus_sync
-
-                ir = {"entities": [], "relations": [], "metadata": {"source": "deterministic", "model_version": "inline"}}
-                ir = augment_ir_with_structured_facts(
-                    ir,
-                    content or "",
-                    anchor_dt=anchor_dt,
-                    timezone="UTC",
-                    default_event_id=f"event_{memory_id}",
-                    default_event_name=(content or "事件")[:20],
-                )
-
-                write_to_milvus_sync(
-                    memory_id=memory_id,
-                    user_id=user_id,
-                    content=content,
-                    embedding=embedding,
-                    valence=valence,
-                )
-                write_ir_to_neo4j(
-                    user_id=user_id,
-                    entities=ir.get("entities") or [],
-                    relations=ir.get("relations") or [],
-                    metadata=ir.get("metadata") or {},
-                    conversation_id=conversation_id,
-                )
-
-                await self.db.execute(
-                    text("""
-                        UPDATE outbox_events
-                        SET status = 'done', processed_at = NOW()
-                        WHERE event_id = :event_id
-                    """),
-                    {"event_id": event_id},
-                )
-                await self.db.execute(
-                    text("""
-                        UPDATE memories
-                        SET status = 'committed', committed_at = NOW()
-                        WHERE id = :id
-                    """),
-                    {"id": memory_id},
-                )
-                await self.db.commit()
-
+            
             return memory_id, event_id
             
         except Exception as e:

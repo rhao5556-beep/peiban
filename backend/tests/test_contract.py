@@ -91,18 +91,16 @@ class TestMemoryContract:
     
     def test_memory_list_schema(self, client: TestClient, auth_headers: dict):
         """验证记忆列表响应 Schema"""
-        response = client.get("/api/v1/memory/list", headers=auth_headers)
+        response = client.get("/api/v1/memories/", headers=auth_headers)
         
         if response.status_code == 200:
             data = response.json()
             
-            assert "memories" in data
-            assert "total" in data
-            assert "page" in data
+            assert isinstance(data, list)
             
             # 验证单个记忆结构
-            if data["memories"]:
-                memory = data["memories"][0]
+            if data:
+                memory = data[0]
                 assert "id" in memory
                 assert "content" in memory
                 assert "status" in memory
@@ -111,11 +109,11 @@ class TestMemoryContract:
         """验证记忆状态枚举值"""
         valid_statuses = ["pending", "committed", "deleted"]
         
-        response = client.get("/api/v1/memory/list", headers=auth_headers)
+        response = client.get("/api/v1/memories/", headers=auth_headers)
         
         if response.status_code == 200:
             data = response.json()
-            for memory in data.get("memories", []):
+            for memory in data:
                 assert memory["status"] in valid_statuses
 
 

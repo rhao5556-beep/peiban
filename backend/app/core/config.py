@@ -1,18 +1,12 @@
 """应用配置"""
 from typing import List
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings
 from functools import lru_cache
 from pathlib import Path
 
 
 class Settings(BaseSettings):
     """应用配置类"""
-
-    model_config = SettingsConfigDict(
-        env_file=str(Path(__file__).resolve().parents[2] / ".env"),
-        case_sensitive=True,
-        extra="ignore",
-    )
     
     # 应用配置
     APP_NAME: str = "Affinity"
@@ -107,6 +101,11 @@ class Settings(BaseSettings):
     CONTENT_LIBRARY_IN_CONVERSATION_MAX_ITEMS: int = 2
     CONTENT_LIBRARY_IN_CONVERSATION_TIMEOUT_MS: int = 150
     
+    class Config:
+        env_file = str(Path(__file__).resolve().parents[2] / ".env")
+        case_sensitive = True
+
+
 @lru_cache()
 def get_settings() -> Settings:
     """获取配置单例"""

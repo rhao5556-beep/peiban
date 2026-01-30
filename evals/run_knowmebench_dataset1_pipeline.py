@@ -160,12 +160,23 @@ def _ask_backend(
     message: str,
     mode: str,
     eval_mode: bool,
+    retrieval_mode: str,
+    force_tier: Optional[int],
+    remember: bool,
     session_id: Optional[str],
     request_timeout_s: float,
 ) -> Dict[str, Any]:
     url = f"{backend_base_url.rstrip('/')}/api/v1/conversation/message"
     headers = {"Authorization": f"Bearer {access_token}"}
-    payload: Dict[str, Any] = {"message": message, "mode": mode, "eval_mode": bool(eval_mode)}
+    payload: Dict[str, Any] = {
+        "message": message,
+        "mode": mode,
+        "eval_mode": bool(eval_mode),
+        "retrieval_mode": str(retrieval_mode),
+        "remember": bool(remember),
+    }
+    if force_tier and int(force_tier) > 0:
+        payload["force_tier"] = int(force_tier)
     if session_id:
         payload["session_id"] = session_id
 
@@ -208,9 +219,22 @@ def main() -> None:
     parser.add_argument("--user_id", default=None)
     parser.add_argument("--limit_per_task", type=int, default=0)
     parser.add_argument("--context_window", type=int, default=30)
+    parser.add_argument(
+        "--excerpt_mode",
+        choices=["none", "evidence_or_date", "random"],
+        default="evidence_or_date",
+    )
+    parser.add_argument("--excerpt_char_budget", type=int, default=4000)
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--request_timeout_s", type=float, default=90.0)
     parser.add_argument("--task", action="append", default=[])
+    parser.add_argument(
+        "--retrieval_mode",
+        choices=["off", "vector", "graph", "both"],
+        default="both",
+    )
+    parser.add_argument("--force_tier", type=int, default=0)
+    parser.add_argument("--remember", action="store_true", default=False)
     args = parser.parse_args()
 
     dataset_dir = Path(args.dataset_dir)
@@ -234,9 +258,14 @@ def main() -> None:
         "backend_base_url": args.backend_base_url,
         "mode": args.mode,
         "eval_mode": bool(args.eval_mode),
+        "retrieval_mode": args.retrieval_mode,
+        "force_tier": int(args.force_tier) if args.force_tier and args.force_tier > 0 else None,
+        "remember": bool(args.remember),
         "user_id": user_id,
         "timestamp": run_ts,
         "context_window": args.context_window,
+        "excerpt_mode": args.excerpt_mode,
+        "excerpt_char_budget": args.excerpt_char_budget,
         "concurrency": args.concurrency,
         "tasks": [],
     }
@@ -288,14 +317,26 @@ def main() -> None:
             context_text = ""
             context_ids: List[int] = []
             iso_date = _parse_date_from_question(question)
-            if evidence_ids:
-                context_text, context_ids = _build_record_context_by_id_window(
-                    dataset_rows=dataset_rows,
-                    evidence_ids=evidence_ids,
-                    context_window=args.context_window,
-                )
-            elif iso_date:
-                context_text, context_ids = _build_record_context(dataset_rows, iso_date)
+            excerpt_mode = str(args.excerpt_mode or "evidence_or_date")
+            if excerpt_mode == "evidence_or_date":
+                if evidence_ids:
+                    context_text, context_ids = _build_record_context_by_id_window(
+                        dataset_rows=dataset_rows,
+                        evidence_ids=evidence_ids,
+                        context_window=args.context_window,
+                    )
+                elif iso_date:
+                    context_text, context_ids = _build_record_context(dataset_rows, iso_date)
+            elif excerpt_mode == "random":
+                rng = random.Random(f"{qid}:{task_type}:{user_id}")
+                n_lines = max(1, len(evidence_ids)) if evidence_ids else 6
+                picked = rng.sample(dataset_rows, k=min(n_lines, len(dataset_rows))) if dataset_rows else []
+                context_ids = [int(r["id"]) for r in picked if "id" in r and isinstance(r.get("id"), int)]
+                context_text = "\n".join(_row_to_line(r) for r in picked)
+
+            if context_text and args.excerpt_char_budget and args.excerpt_char_budget > 0:
+                if len(context_text) > int(args.excerpt_char_budget):
+                    context_text = context_text[: int(args.excerpt_char_budget)]
 
             injected_message = question
             if context_text:
@@ -315,16 +356,21 @@ def main() -> None:
                     message=injected_message,
                     mode=args.mode,
                     eval_mode=args.eval_mode,
+                    retrieval_mode=args.retrieval_mode,
+                    force_tier=args.force_tier if args.force_tier and args.force_tier > 0 else None,
+                    remember=args.remember,
                     session_id=session_id,
                     request_timeout_s=args.request_timeout_s,
                 )
                 reply = resp.get("reply", "")
                 cs = resp.get("context_source")
+                memories_used = resp.get("memories_used")
                 turn_id = resp.get("turn_id")
                 sid = resp.get("session_id")
             except Exception as e:
                 reply = ""
                 cs = None
+                memories_used = None
                 turn_id = None
                 sid = None
                 err = f"{e.__class__.__name__}: {e}"
@@ -347,6 +393,10 @@ def main() -> None:
                     "evidence": evidence,
                     "record_date": iso_date,
                     "record_ids": context_ids,
+                    "excerpt_mode": args.excerpt_mode,
+                    "excerpt_char_budget": args.excerpt_char_budget,
+                    "excerpt_chars": len(context_text) if context_text else 0,
+                    "memories_used": memories_used,
                     "context_source": cs,
                     "error": err,
                 },

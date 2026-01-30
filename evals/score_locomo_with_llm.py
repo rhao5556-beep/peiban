@@ -115,7 +115,6 @@ def _call_llm_judge(
     api_key: str,
     api_base: str,
     model: str,
-    timeout_s: float,
 ) -> Tuple[bool, float, str]:
     """
     Call LLM to judge if the model answer is correct
@@ -157,22 +156,18 @@ Be strict but fair. Minor paraphrasing is acceptable if the meaning is preserved
             },
             json={
                 "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "Return only a valid JSON object. No markdown, no extra keys, no prose.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
+                "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.0,
                 "max_tokens": 500,
             },
-            timeout=float(timeout_s),
+            timeout=30,
         )
         response.raise_for_status()
         
         content = response.json()["choices"][0]["message"]["content"]
         
+        # Try to parse JSON from response
+        # Sometimes LLM wraps JSON in markdown code blocks
         content = content.strip()
         if content.startswith("```json"):
             content = content[7:]
@@ -181,16 +176,8 @@ Be strict but fair. Minor paraphrasing is acceptable if the meaning is preserved
         if content.endswith("```"):
             content = content[:-3]
         content = content.strip()
-
-        try:
-            result = json.loads(content)
-        except json.JSONDecodeError:
-            start = content.find("{")
-            end = content.rfind("}")
-            if start >= 0 and end > start:
-                result = json.loads(content[start : end + 1])
-            else:
-                raise
+        
+        result = json.loads(content)
         return (
             bool(result.get("correct", False)),
             float(result.get("confidence", 0.0)),
@@ -224,7 +211,6 @@ def score_outputs_with_llm(
     api_base: Optional[str] = None,
     model: Optional[str] = None,
     rate_limit_delay: float = 0.1,
-    timeout_s: float = 30.0,
 ) -> Tuple[Dict[str, Any], List[ScoredItem]]:
     """
     Score model outputs using LLM judge
@@ -241,15 +227,12 @@ def score_outputs_with_llm(
     
     for i, it in enumerate(items):
         qid = int(it.get("id") or 0)
-        meta = it.get("meta") or {}
-        task_type_raw = it.get("task_type") or meta.get("task_type") or ""
-        task_type = str(task_type_raw).strip() or "unknown"
+        task_type = str(it.get("task_type") or "")
         question = str(it.get("question") or "")
         ref = str(it.get("reference_answer") or "")
         pred = str(it.get("model_answer") or "")
-        cat = it.get("category")
-        if not isinstance(cat, int):
-            cat = meta.get("category")
+        meta = it.get("meta") or {}
+        cat = meta.get("category")
         category = int(cat) if isinstance(cat, int) else None
         
         # Always compute exact match
@@ -258,27 +241,19 @@ def score_outputs_with_llm(
         # Use LLM judge if enabled
         if use_llm and api_key and api_base and model:
             try:
-                last_error: Exception | None = None
-                for attempt in range(3):
-                    try:
-                        correct, confidence, reasoning = _call_llm_judge(
-                            question=question,
-                            reference_answer=ref,
-                            model_answer=pred,
-                            category=category,
-                            api_key=api_key,
-                            api_base=api_base,
-                            model=model,
-                            timeout_s=timeout_s,
-                        )
-                        break
-                    except Exception as e:
-                        last_error = e
-                        if attempt >= 2:
-                            raise
-                        time.sleep(rate_limit_delay or 0.1)
+                correct, confidence, reasoning = _call_llm_judge(
+                    question=question,
+                    reference_answer=ref,
+                    model_answer=pred,
+                    category=category,
+                    api_key=api_key,
+                    api_base=api_base,
+                    model=model,
+                )
+                
                 if i > 0 and rate_limit_delay > 0:
                     time.sleep(rate_limit_delay)
+                
             except Exception as e:
                 print(f"Error judging item {qid}: {e}")
                 correct = exact_match
@@ -326,7 +301,7 @@ def score_outputs_with_llm(
         by_task[t]["confidence_sum"] += s.confidence
         
         c = str(s.category) if s.category is not None else "unknown"
-        cat_name = CATEGORY_NAMES.get(s.category, "Unknown") if s.category is not None else "Unknown"
+        cat_name = CATEGORY_NAMES.get(s.category, "Unknown") if s.category else "Unknown"
         by_cat.setdefault(c, {
             "category_name": cat_name,
             "total": 0,
@@ -374,11 +349,10 @@ def main() -> None:
     p.add_argument("--detailed_out_path", default="", help="Path to save detailed scores")
     p.add_argument("--use_llm", action="store_true", default=True, help="Use LLM judge")
     p.add_argument("--no_llm", action="store_true", help="Disable LLM judge (exact match only)")
-    p.add_argument("--api_key", default=os.environ.get("EVAL_JUDGE_API_KEY") or os.environ.get("OPENAI_API_KEY"), help="API key")
-    p.add_argument("--api_base", default=os.environ.get("EVAL_JUDGE_API_BASE") or os.environ.get("OPENAI_API_BASE", "https://api.siliconflow.cn/v1"), help="API base URL")
-    p.add_argument("--model", default=os.environ.get("EVAL_JUDGE_MODEL") or os.environ.get("OPENAI_MODEL", "deepseek-ai/DeepSeek-V3"), help="Judge model")
+    p.add_argument("--api_key", default=os.environ.get("OPENAI_API_KEY"), help="API key")
+    p.add_argument("--api_base", default=os.environ.get("OPENAI_API_BASE", "https://api.siliconflow.cn/v1"), help="API base URL")
+    p.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "deepseek-ai/DeepSeek-V3"), help="Judge model")
     p.add_argument("--rate_limit_delay", type=float, default=0.1, help="Delay between API calls")
-    p.add_argument("--timeout_s", type=float, default=30.0, help="Timeout for each LLM judge call")
     args = p.parse_args()
     
     use_llm = args.use_llm and not args.no_llm
@@ -404,7 +378,6 @@ def main() -> None:
         api_base=args.api_base,
         model=args.model,
         rate_limit_delay=args.rate_limit_delay,
-        timeout_s=float(args.timeout_s),
     )
     
     print("\n" + "="*60)

@@ -17,29 +17,16 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_sync_engine = None
-_SyncSessionLocal = None
-
 
 def get_sync_db_session():
     """获取同步数据库会话（用于 Celery worker）"""
-    global _sync_engine, _SyncSessionLocal
-    if _sync_engine is None:
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
-
-        sync_url = settings.DATABASE_URL
-        _sync_engine = create_engine(
-            sync_url,
-            pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=0,
-            pool_recycle=1800,
-            pool_timeout=30,
-        )
-        _SyncSessionLocal = sessionmaker(bind=_sync_engine)
-
-    return _SyncSessionLocal()
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    
+    sync_url = settings.DATABASE_URL  # 已经是同步 URL
+    engine = create_engine(sync_url, pool_pre_ping=True)
+    Session = sessionmaker(bind=engine)
+    return Session()
 
 
 def get_recent_entities(user_id: str, limit: int = 50) -> List[Dict]:
@@ -120,66 +107,6 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
         user_id = payload.get("user_id")
         content = payload.get("content")
         embedding = payload.get("embedding")
-        skip_llm_extraction = bool(payload.get("skip_llm_extraction"))
-
-        if skip_llm_extraction:
-            from app.services.structured_fact_extractor import augment_ir_with_structured_facts
-            ir = {"entities": [], "relations": [], "metadata": {"source": "deterministic", "model_version": "skip_llm"}}
-            ir = augment_ir_with_structured_facts(
-                ir,
-                content or "",
-                anchor_dt=datetime.utcnow(),
-                timezone="UTC",
-                default_event_id=f"event_{memory_id}",
-                default_event_name=(content or "事件")[:20],
-            )
-            validated_entities = ir.get("entities") or []
-            validated_relations = ir.get("relations") or []
-
-            milvus_id = write_to_milvus_sync(
-                memory_id=memory_id,
-                user_id=user_id,
-                content=content,
-                embedding=embedding,
-                valence=payload.get("valence", 0),
-            )
-
-            neo4j_result = write_ir_to_neo4j(
-                user_id=user_id,
-                entities=validated_entities,
-                relations=validated_relations,
-                metadata=ir.get("metadata") or {},
-                conversation_id=payload.get("conversation_id"),
-            )
-
-            db.execute(
-                text("""
-                    UPDATE outbox_events 
-                    SET status = 'done', processed_at = NOW()
-                    WHERE event_id = :event_id
-                """),
-                {"event_id": event_id},
-            )
-            db.execute(
-                text("""
-                    UPDATE memories 
-                    SET status = 'committed', committed_at = NOW()
-                    WHERE id = :id
-                """),
-                {"id": memory_id},
-            )
-            db.commit()
-            logger.info(f"Event {event_id} processed successfully (skip_llm_extraction)")
-            return {
-                "status": "success",
-                "event_id": event_id,
-                "memory_id": memory_id,
-                "milvus_id": milvus_id,
-                "neo4j_result": neo4j_result,
-                "entities_count": len(validated_entities),
-                "relations_count": len(validated_relations),
-                "processed_at": datetime.now().isoformat(),
-            }
         
         # 2. 获取用户已有实体（用于 LLM 消歧）
         context_entities = get_recent_entities(user_id)
@@ -203,10 +130,22 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
             else:
                 # 超过重试次数，标记 pending_review，但仍然提交记忆（避免前端一直显示"记忆中..."）
                 logger.error(f"LLM extraction failed after {retry_count + 1} attempts, marking pending_review but committing memory")
+
+                try:
+                    write_to_milvus_sync(
+                        memory_id=memory_id,
+                        user_id=user_id,
+                        content=content,
+                        embedding=embedding,
+                        valence=payload.get("valence", 0),
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to write to Milvus in pending_review branch: {e}")
                 db.execute(
                     text("""
                         UPDATE outbox_events 
                         SET status = 'pending_review', 
+                            error_message = :error,
                             error_message = :error,
                             processed_at = NOW()
                         WHERE event_id = :event_id
@@ -214,14 +153,7 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
                     {"event_id": event_id, "error": extraction_result.error}
                 )
                 
-                milvus_id = write_to_milvus_sync(
-                    memory_id=memory_id,
-                    user_id=user_id,
-                    content=content,
-                    embedding=embedding,
-                    valence=payload.get("valence", 0),
-                )
-
+                # 即使 LLM 失败，也要提交记忆，避免前端一直显示"记忆中..."
                 db.execute(
                     text("""
                         UPDATE memories 
@@ -236,7 +168,6 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
                     "status": "pending_review",
                     "event_id": event_id,
                     "memory_id": memory_id,
-                    "milvus_id": milvus_id,
                     "error": extraction_result.error,
                     "note": "Memory committed despite LLM failure to avoid frontend stuck in 'remembering' state"
                 }
@@ -255,23 +186,9 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
             f"relations {critic_result.stats['input_relations']}->{critic_result.stats['output_relations']}"
         )
         
-        from app.services.structured_fact_extractor import augment_ir_with_structured_facts
-
-        ir = {
-            "entities": critic_result.entities,
-            "relations": critic_result.relations,
-            "metadata": extraction_result.metadata,
-        }
-        ir = augment_ir_with_structured_facts(
-            ir,
-            content or "",
-            anchor_dt=datetime.utcnow(),
-            timezone="UTC",
-            default_event_id=f"event_{memory_id}",
-            default_event_name=(content or "事件")[:20],
-        )
-        validated_entities = ir.get("entities") or []
-        validated_relations = ir.get("relations") or []
+        # 使用校验后的实体和关系
+        validated_entities = critic_result.entities
+        validated_relations = critic_result.relations
         
         # 5. 写入 Milvus
         milvus_id = write_to_milvus_sync(
@@ -287,7 +204,7 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
             user_id=user_id,
             entities=validated_entities,
             relations=validated_relations,
-            metadata=ir.get("metadata") or extraction_result.metadata,
+            metadata=extraction_result.metadata,
             conversation_id=payload.get("conversation_id")
         )
         
@@ -361,9 +278,7 @@ def process_pending_events():
                 SELECT event_id, payload 
                 FROM outbox_events 
                 WHERE status = 'pending'
-                ORDER BY 
-                    COALESCE((payload->>'skip_llm_extraction')::boolean, false) DESC,
-                    created_at DESC
+                ORDER BY created_at
                 LIMIT 100
             """)
         )
@@ -568,7 +483,7 @@ def write_ir_to_neo4j(
                     continue
                 
                 # 使用动态标签，MERGE 时包含 user_id 确保用户隔离
-                label = ent_type if ent_type in ["Person", "Location", "Organization", "Event", "Preference", "TimeExpression", "Duration", "Quantity"] else "Other"
+                label = ent_type if ent_type in ["Person", "Location", "Organization", "Event", "Preference"] else "Other"
                 
                 result = session.run(
                     f"""
@@ -581,27 +496,10 @@ def write_ir_to_neo4j(
                         e.last_mentioned_at = datetime(),
                         e.mention_count = 1,
                         e.source = $source,
-                        e.model_version = $model_version,
-                        e.value = $value,
-                        e.unit = $unit,
-                        e.seconds = $seconds,
-                        e.start_date = $start_date,
-                        e.end_date = $end_date,
-                        e.duration_seconds = $duration_seconds,
-                        e.cost_value = $cost_value,
-                        e.cost_unit = $cost_unit,
-                        e.timezone = $timezone,
-                        e.time_precision = $time_precision
+                        e.model_version = $model_version
                     ON MATCH SET 
                         e.last_mentioned_at = datetime(),
-                        e.mention_count = e.mention_count + 1,
-                        e.start_date = CASE WHEN $start_date IS NULL THEN e.start_date ELSE $start_date END,
-                        e.end_date = CASE WHEN $end_date IS NULL THEN e.end_date ELSE $end_date END,
-                        e.duration_seconds = CASE WHEN $duration_seconds IS NULL THEN e.duration_seconds ELSE $duration_seconds END,
-                        e.cost_value = CASE WHEN $cost_value IS NULL THEN e.cost_value ELSE $cost_value END,
-                        e.cost_unit = CASE WHEN $cost_unit IS NULL THEN e.cost_unit ELSE $cost_unit END,
-                        e.timezone = CASE WHEN $timezone IS NULL THEN e.timezone ELSE $timezone END,
-                        e.time_precision = CASE WHEN $time_precision IS NULL THEN e.time_precision ELSE $time_precision END
+                        e.mention_count = e.mention_count + 1
                     RETURN e.id AS id
                     """,
                     id=ent_id,
@@ -610,17 +508,7 @@ def write_ir_to_neo4j(
                     user_id=user_id,
                     confidence=float(ent.get("confidence", 0.8)),
                     source=metadata.get("source", "llm"),
-                    model_version=metadata.get("model_version", "unknown"),
-                    value=ent.get("value"),
-                    unit=ent.get("unit"),
-                    seconds=ent.get("seconds"),
-                    start_date=ent.get("start_date"),
-                    end_date=ent.get("end_date"),
-                    duration_seconds=ent.get("duration_seconds"),
-                    cost_value=ent.get("cost_value"),
-                    cost_unit=ent.get("cost_unit"),
-                    timezone=ent.get("timezone"),
-                    time_precision=ent.get("time_precision"),
+                    model_version=metadata.get("model_version", "unknown")
                 )
                 record = result.single()
                 if record:
