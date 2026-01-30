@@ -1,0 +1,14 @@
+filter.lfs.clean=git-lfs clean -- %f
+filter.lfs.smudge=git-lfs smudge -- %f
+filter.lfs.process=git-lfs filter-process
+filter.lfs.required=true
+user.name=murphy004
+user.email=1810493084@qq.com
+safe.directory=*
+safe.directory=*
+safe.directory=*
+safe.directory=*
+safe.directory=*
+safe.directory=*
+safe.directory=*
+safe.directory=*

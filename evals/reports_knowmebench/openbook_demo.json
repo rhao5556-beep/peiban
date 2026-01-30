@@ -1,0 +1,115 @@
+{
+  "meta": {
+    "judge_model": "Pro/deepseek-ai/DeepSeek-V3.2",
+    "total_items": 15,
+    "evaluated_items": 0,
+    "average_score": 0.0
+  },
+  "details": [
+    {
+      "id": 1,
+      "task_type": "Adversarial Abstention",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 2,
+      "task_type": "Adversarial Abstention",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 3,
+      "task_type": "Adversarial Abstention",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 4,
+      "task_type": "Adversarial Abstention",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 5,
+      "task_type": "Adversarial Abstention",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 1,
+      "task_type": "Logical Event Ordering",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 2,
+      "task_type": "Logical Event Ordering",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 3,
+      "task_type": "Logical Event Ordering",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 4,
+      "task_type": "Logical Event Ordering",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 5,
+      "task_type": "Logical Event Ordering",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 1,
+      "task_type": "Temporal Reasoning",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 2,
+      "task_type": "Temporal Reasoning",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 3,
+      "task_type": "Temporal Reasoning",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 4,
+      "task_type": "Temporal Reasoning",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    },
+    {
+      "id": 5,
+      "task_type": "Temporal Reasoning",
+      "score": 0.0,
+      "reasoning": "Task type not found in prompt file",
+      "status": "skipped"
+    }
+  ]
+}

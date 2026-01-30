@@ -1,0 +1,37 @@
+{
+  "timestamp": "20260129_160301",
+  "run_dir": "outputs\\knowmebench_memorytrack\\ds1_pipeline_graph_only_20260129_153147",
+  "judge_file": "evals\\reports_knowmebench\\memorytrack_demo.json",
+  "merged_file": "outputs\\knowmebench_memorytrack\\ds1_pipeline_graph_only_20260129_153147\\merged_for_official_eval.json",
+  "judge_model": "Pro/deepseek-ai/DeepSeek-V3.2",
+  "total_items": 15,
+  "evaluated_items": 0,
+  "average_score": 0.0,
+  "per_task": [
+    {
+      "task_type": "Adversarial Abstention",
+      "total_items": 5,
+      "evaluated_items": 0,
+      "average_score": 0.0,
+      "low_score_count": 0,
+      "high_score_count": 0
+    },
+    {
+      "task_type": "Logical Event Ordering",
+      "total_items": 5,
+      "evaluated_items": 0,
+      "average_score": 0.0,
+      "low_score_count": 0,
+      "high_score_count": 0
+    },
+    {
+      "task_type": "Temporal Reasoning",
+      "total_items": 5,
+      "evaluated_items": 0,
+      "average_score": 0.0,
+      "low_score_count": 0,
+      "high_score_count": 0
+    }
+  ],
+  "report_path": "C:\\Users\\murphy\\Desktop\\陪伴项目\\evals\\reports_knowmebench\\report_20260129_160301.md"
+}

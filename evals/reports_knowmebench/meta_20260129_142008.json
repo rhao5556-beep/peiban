@@ -1,0 +1,69 @@
+{
+  "timestamp": "20260129_142008",
+  "run_dir": "outputs\\knowmebench_run\\abc_attribution_20260129\\A\\ds1_pipeline_graph_only_20260129_135338",
+  "judge_file": "outputs\\knowmebench_run\\abc_attribution_20260129\\A\\judge_results.json",
+  "merged_file": "outputs\\knowmebench_run\\abc_attribution_20260129\\A\\ds1_pipeline_graph_only_20260129_135338\\merged_for_official_eval.json",
+  "judge_model": "Pro/deepseek-ai/DeepSeek-V3.2",
+  "total_items": 35,
+  "evaluated_items": 0,
+  "average_score": 0.0,
+  "per_task": [
+    {
+      "task_type": "Adversarial Abstention",
+      "total_items": 5,
+      "evaluated_items": 0,
+      "average_score": 0.0,
+      "low_score_count": 0,
+      "high_score_count": 0
+    },
+    {
+      "task_type": "Expert-Annotated Psychoanalysis",
+      "total_items": 5,
+      "evaluated_items": 0,
+      "average_score": 0.0,
+      "low_score_count": 0,
+      "high_score_count": 0
+    },
+    {
+      "task_type": "Information Extraction",
+      "total_items": 5,
+      "evaluated_items": 0,
+      "average_score": 0.0,
+      "low_score_count": 0,
+      "high_score_count": 0
+    },
+    {
+      "task_type": "Logical Event Ordering",
+      "total_items": 5,
+      "evaluated_items": 0,
+      "average_score": 0.0,
+      "low_score_count": 0,
+      "high_score_count": 0
+    },
+    {
+      "task_type": "Mind-Body Interaction",
+      "total_items": 5,
+      "evaluated_items": 0,
+      "average_score": 0.0,
+      "low_score_count": 0,
+      "high_score_count": 0
+    },
+    {
+      "task_type": "Mnestic Trigger Analysis",
+      "total_items": 5,
+      "evaluated_items": 0,
+      "average_score": 0.0,
+      "low_score_count": 0,
+      "high_score_count": 0
+    },
+    {
+      "task_type": "Temporal Reasoning",
+      "total_items": 5,
+      "evaluated_items": 0,
+      "average_score": 0.0,
+      "low_score_count": 0,
+      "high_score_count": 0
+    }
+  ],
+  "report_path": "C:\\Users\\murphy\\Desktop\\陪伴项目\\evals\\reports_knowmebench\\report_20260129_142008.md"
+}

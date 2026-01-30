@@ -1,0 +1,3 @@
+[submodule "external/KnowMeBench"]
+	path = external/KnowMeBench
+	url = https://github.com/QuantaAlpha/KnowMeBench.git
