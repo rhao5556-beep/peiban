@@ -58,7 +58,9 @@ class EmbeddingService:
         if not hasattr(self, 'client'):
             self.client = AsyncOpenAI(
                 api_key=settings.OPENAI_API_KEY,
-                base_url=settings.OPENAI_API_BASE
+                base_url=settings.OPENAI_API_BASE,
+                timeout=float(settings.EMBEDDING_REQUEST_TIMEOUT_S),
+                max_retries=1,
             )
             self.model_name = model_name
             self._redis = None
@@ -104,9 +106,14 @@ class EmbeddingService:
         
         # 调用 API
         try:
-            response = await self.client.embeddings.create(
-                input=text,
-                model=self.model_name
+            import asyncio
+
+            response = await asyncio.wait_for(
+                self.client.embeddings.create(
+                    input=text,
+                    model=self.model_name,
+                ),
+                timeout=float(settings.EMBEDDING_REQUEST_TIMEOUT_S),
             )
             embedding = response.data[0].embedding
             
@@ -346,7 +353,8 @@ class RetrievalService:
                 param=search_params,
                 limit=top_k,
                 expr=f'user_id == "{user_id}"',
-                output_fields=["id", "content", "valence", "created_at"]
+                output_fields=["id", "content", "valence", "created_at"],
+                timeout=5.0,
             )
             
             # 3. 转换为 Memory 对象
@@ -414,6 +422,47 @@ class RetrievalService:
             return expanded
         
         try:
+            missing_entity_ids = [m.id for m in candidates[:10] if not m.entity_id]
+            if missing_entity_ids:
+                try:
+                    from sqlalchemy import bindparam, text
+                    from app.core.database import AsyncSessionLocal
+
+                    stmt = (
+                        text(
+                            """
+                            SELECT t.memory_id_text, t.entity_id
+                            FROM (
+                                SELECT
+                                    me.memory_id::text AS memory_id_text,
+                                    me.entity_id,
+                                    ROW_NUMBER() OVER (
+                                        PARTITION BY me.memory_id
+                                        ORDER BY COALESCE(me.confidence, 0.8) DESC, me.created_at DESC
+                                    ) AS rn
+                                FROM memory_entities me
+                                WHERE me.user_id::text = :user_id
+                                  AND me.memory_id::text IN :memory_ids
+                            ) t
+                            WHERE t.rn = 1
+                            """
+                        )
+                        .bindparams(bindparam("memory_ids", expanding=True))
+                    )
+
+                    async with AsyncSessionLocal() as session:
+                        res = await session.execute(
+                            stmt,
+                            {"user_id": str(user_id), "memory_ids": [str(x) for x in missing_entity_ids]},
+                        )
+                        primary = {row[0]: row[1] for row in res.fetchall()}
+
+                    for m in candidates[:10]:
+                        if not m.entity_id and m.id in primary:
+                            m.entity_id = primary[m.id] or ""
+                except Exception as e:
+                    logger.warning(f"Failed to backfill candidate entity_id: {e}")
+
             # 对每个候选记忆的实体，获取邻居
             for memory in candidates[:10]:  # 限制扩展数量
                 if not memory.entity_id:
@@ -450,10 +499,57 @@ class RetrievalService:
         user_id: str,
         limit: int = 5
     ) -> List[Memory]:
-        """获取实体关联的记忆 - 由于 Milvus 没有 entity_id 字段，暂时返回空"""
-        # Milvus schema 中没有 entity_id 字段，图扩展功能暂不可用
-        # 未来可以通过 PostgreSQL 的 memory 表来实现
-        return []
+        """获取实体关联的记忆 - 使用 Postgres memory_entities bridge"""
+        try:
+            from sqlalchemy import text
+            from app.core.database import AsyncSessionLocal
+
+            stmt = text(
+                """
+                SELECT
+                    m.id::text AS id,
+                    m.content AS content,
+                    COALESCE(m.valence, 0.0) AS valence,
+                    m.created_at AS created_at
+                FROM memory_entities me
+                JOIN memories m ON m.id = me.memory_id
+                WHERE me.user_id::text = :user_id
+                  AND me.entity_id = :entity_id
+                  AND m.status = 'committed'
+                ORDER BY me.created_at DESC, COALESCE(me.confidence, 0.8) DESC, m.created_at DESC
+                LIMIT :limit
+                """
+            )
+
+            async with AsyncSessionLocal() as session:
+                res = await session.execute(
+                    stmt,
+                    {
+                        "user_id": str(user_id),
+                        "entity_id": str(entity_id),
+                        "limit": int(limit),
+                    },
+                )
+                rows = res.fetchall()
+
+            out: List[Memory] = []
+            for r in rows:
+                created_at = r.created_at if isinstance(r.created_at, datetime) else datetime.now()
+                out.append(
+                    Memory(
+                        id=str(r.id),
+                        content=str(r.content or ""),
+                        entity_id=str(entity_id),
+                        cosine_sim=0.0,
+                        valence=float(r.valence or 0.0),
+                        created_at=created_at,
+                        recency_score=self._calculate_recency(created_at),
+                    )
+                )
+            return out
+        except Exception as e:
+            logger.warning(f"Failed to load entity memories from Postgres: {e}")
+            return []
     
     def _rerank(
         self,
@@ -654,6 +750,7 @@ class RetrievalService:
                 return []
             
             async with neo4j.session() as session:
+                neo4j_timeout_s = 2.0
                 for entity_name in entity_names:
                     # 查找实体节点（模糊匹配名称）
                     find_entity_query = """
@@ -665,7 +762,8 @@ class RetrievalService:
                     result = await session.run(
                         find_entity_query, 
                         user_id=user_id, 
-                        entity_name=entity_name
+                        entity_name=entity_name,
+                        timeout=neo4j_timeout_s,
                     )
                     
                     entity_ids = []
@@ -699,7 +797,8 @@ class RetrievalService:
                         out_result = await session.run(
                             direct_out_query,
                             entity_id=entity_id,
-                            user_id=user_id
+                            user_id=user_id,
+                            timeout=neo4j_timeout_s,
                         )
                         
                         async for rec in out_result:
@@ -725,7 +824,8 @@ class RetrievalService:
                         in_result = await session.run(
                             direct_in_query,
                             entity_id=entity_id,
-                            user_id=user_id
+                            user_id=user_id,
+                            timeout=neo4j_timeout_s,
                         )
                         
                         async for rec in in_result:
@@ -756,7 +856,8 @@ class RetrievalService:
                         two_hop_result = await session.run(
                             two_hop_query,
                             entity_id=entity_id,
-                            user_id=user_id
+                            user_id=user_id,
+                            timeout=neo4j_timeout_s,
                         )
                         
                         async for rec in two_hop_result:
@@ -790,7 +891,8 @@ class RetrievalService:
                         two_hop_rev_result = await session.run(
                             two_hop_reverse_query,
                             entity_id=entity_id,
-                            user_id=user_id
+                            user_id=user_id,
+                            timeout=neo4j_timeout_s,
                         )
                         
                         async for rec in two_hop_rev_result:
@@ -826,7 +928,8 @@ class RetrievalService:
                         three_hop_result = await session.run(
                             three_hop_query,
                             entity_id=entity_id,
-                            user_id=user_id
+                            user_id=user_id,
+                            timeout=neo4j_timeout_s,
                         )
                         
                         async for rec in three_hop_result:
@@ -861,7 +964,8 @@ class RetrievalService:
                         three_hop_rev_result = await session.run(
                             three_hop_reverse_query,
                             entity_id=entity_id,
-                            user_id=user_id
+                            user_id=user_id,
+                            timeout=neo4j_timeout_s,
                         )
                         
                         async for rec in three_hop_rev_result:
@@ -971,7 +1075,8 @@ class RetrievalService:
                     result = await session.run(
                         semantic_query,
                         user_id=user_id,
-                        rel_type=rel_type
+                        rel_type=rel_type,
+                        timeout=2.0,
                     )
                     
                     async for rec in result:
@@ -1004,13 +1109,16 @@ class RetrievalService:
             实体名称列表
         """
         try:
+            import asyncio
+
             # 使用轻量级 prompt 提取实体，支持语义概念
-            response = await self.embedding_service.client.chat.completions.create(
-                model="deepseek-ai/DeepSeek-V3",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """你是一个实体识别器。从用户的问题中提取被询问的实体名称。
+            response = await asyncio.wait_for(
+                self.embedding_service.client.chat.completions.create(
+                    model=settings.ENTITY_EXTRACTION_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": """你是一个实体识别器。从用户的问题中提取被询问的实体名称。
 
 规则：
 1. 提取问题中明确提到的人名、地名、事物名
@@ -1026,14 +1134,16 @@ class RetrievalService:
 - "谁来自南方" → ["南方"]
 - "今天天气怎么样" → []
 - "你好" → []"""
-                    },
-                    {
-                        "role": "user",
-                        "content": f"问题：{query}\n\n请提取实体名称（JSON数组）："
-                    }
-                ],
-                temperature=0.0,
-                max_tokens=100
+                        },
+                        {
+                            "role": "user",
+                            "content": f"问题：{query}\n\n请提取实体名称（JSON数组）：",
+                        },
+                    ],
+                    temperature=0.0,
+                    max_tokens=100,
+                ),
+                timeout=float(settings.ENTITY_EXTRACTION_TIMEOUT_S),
             )
             
             content = response.choices[0].message.content.strip()

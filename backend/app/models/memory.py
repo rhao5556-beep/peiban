@@ -16,7 +16,7 @@ class Memory(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     content = Column(Text, nullable=False)
-    embedding = Column(Vector(768), nullable=True)  # pgvector
+    embedding = Column(Vector(1024), nullable=True)  # pgvector
     valence = Column(Float, nullable=True)  # 情感正负向 [-1, 1]
     status = Column(String(20), default="pending")  # pending, committed, deleted
     conversation_id = Column(UUID(as_uuid=True), nullable=True)

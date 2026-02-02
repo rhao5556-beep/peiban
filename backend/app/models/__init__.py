@@ -2,6 +2,7 @@
 from app.models.user import User
 from app.models.session import Session
 from app.models.memory import Memory
+from app.models.memory_entity import MemoryEntity
 from app.models.affinity import AffinityHistory
 from app.models.outbox import OutboxEvent
 from app.models.context_memory import ContextMemory
@@ -15,6 +16,7 @@ __all__ = [
     "User",
     "Session",
     "Memory",
+    "MemoryEntity",
     "AffinityHistory",
     "OutboxEvent",
     "ContextMemory",

@@ -32,7 +32,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 验证服务：
 ```bash
-curl http://localhost:8000/api/v1/health
+curl http://localhost:8000/health
 ```
 
 ### 2. 配置已就绪
@@ -47,12 +47,8 @@ curl http://localhost:8000/api/v1/health
 ### 步骤 1：运行评测（生成模型输出）
 
 ```bash
-# 在项目根目录执行
-python affinity_evals/knowmebench/run_dataset1_pipeline.py \
-  --backend_base_url http://localhost:8000 \
-  --mode graph_only \
-  --eval_mode \
-  --concurrency 6
+# 推荐：使用一键脚本（会先做环境预检）
+run_knowmebench_eval.bat full
 ```
 
 **参数说明：**
@@ -67,17 +63,12 @@ python affinity_evals/knowmebench/run_dataset1_pipeline.py \
 
 **快速测试示例（每个任务只跑 5 题）：**
 ```bash
-python affinity_evals/knowmebench/run_dataset1_pipeline.py \
-  --backend_base_url http://localhost:8000 \
-  --mode graph_only \
-  --eval_mode \
-  --limit_per_task 5 \
-  --concurrency 4
+run_knowmebench_eval.bat quick
 ```
 
 **运行特定任务：**
 ```bash
-python affinity_evals/knowmebench/run_dataset1_pipeline.py \
+python evals/run_knowmebench_dataset1_pipeline.py \
   --backend_base_url http://localhost:8000 \
   --mode graph_only \
   --eval_mode \
@@ -96,11 +87,7 @@ outputs/knowmebench_run/ds1_pipeline_graph_only_<timestamp>/
 ### 步骤 2：运行 Judge 评分
 
 ```bash
-# 对步骤 1 的输出进行评分
-python affinity_evals/knowmebench/official_judge.py \
-  --input_dir outputs/knowmebench_run/ds1_pipeline_graph_only_<timestamp> \
-  --output_file outputs/knowmebench_run/ds1_pipeline_graph_only_<timestamp>/judge_results.json \
-  --concurrency 4
+run_knowmebench_eval.bat judge
 ```
 
 **参数说明：**
@@ -146,20 +133,13 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 # 2. 在新终端运行评测（完整版）
 cd ..
-python affinity_evals/knowmebench/run_dataset1_pipeline.py \
-  --backend_base_url http://localhost:8000 \
-  --mode graph_only \
-  --eval_mode \
-  --concurrency 6
+run_knowmebench_eval.bat full
 
 # 3. 记录输出目录（例如：outputs/knowmebench_run/ds1_pipeline_graph_only_20260126_143022）
 # 脚本会在最后一行打印输出目录路径
 
 # 4. 运行 Judge 评分
-python affinity_evals/knowmebench/official_judge.py \
-  --input_dir outputs/knowmebench_run/ds1_pipeline_graph_only_20260126_143022 \
-  --output_file outputs/knowmebench_run/ds1_pipeline_graph_only_20260126_143022/judge_results.json \
-  --concurrency 4
+run_knowmebench_eval.bat judge
 
 # 5. 查看结果
 cat outputs/knowmebench_run/ds1_pipeline_graph_only_20260126_143022/judge_results.json
@@ -188,8 +168,8 @@ cat outputs/knowmebench_run/ds1_pipeline_graph_only_20260126_143022/judge_result
 ### 2. 快速验证
 ```bash
 # 每个任务只跑 3 题，快速验证流程
-python affinity_evals/knowmebench/run_dataset1_pipeline.py \
-  --backend_base_url http://localhost:8010 \
+python evals/run_knowmebench_dataset1_pipeline.py \
+  --backend_base_url http://localhost:8000 \
   --mode graph_only \
   --eval_mode \
   --limit_per_task 3 \
@@ -199,16 +179,16 @@ python affinity_evals/knowmebench/run_dataset1_pipeline.py \
 ### 3. 分批运行
 ```bash
 # 先跑简单任务
-python affinity_evals/knowmebench/run_dataset1_pipeline.py \
-  --backend_base_url http://localhost:8010 \
+python evals/run_knowmebench_dataset1_pipeline.py \
+  --backend_base_url http://localhost:8000 \
   --mode graph_only \
   --eval_mode \
   --task "Information Extraction" \
   --task "Adversarial Abstention"
 
 # 再跑复杂任务
-python affinity_evals/knowmebench/run_dataset1_pipeline.py \
-  --backend_base_url http://localhost:8010 \
+python evals/run_knowmebench_dataset1_pipeline.py \
+  --backend_base_url http://localhost:8000 \
   --mode graph_only \
   --eval_mode \
   --task "Expert-Annotated Psychoanalysis" \
@@ -223,7 +203,7 @@ python affinity_evals/knowmebench/run_dataset1_pipeline.py \
 **解决：**
 ```bash
 # 检查后端是否运行
-curl http://localhost:8000/api/v1/health
+curl http://localhost:8000/health
 
 # 确保 --backend_base_url 参数正确
 ```
@@ -295,7 +275,7 @@ ls -lt evals/reports/report_*.md | head -1
 ## 相关文档
 
 - KnowMeBench 官方仓库：`external/KnowMeBench/`
-- 评测框架代码：`affinity_evals/knowmebench/`
+- 评测入口脚本：`run_knowmebench_eval.bat`、`evals/run_knowmebench_dataset1_pipeline.py`
 - 历史评测结果：`evals/reports/`
 - 后端 API 文档：http://localhost:8000/docs
 

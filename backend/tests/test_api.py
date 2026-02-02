@@ -118,7 +118,7 @@ class TestMemory:
     async def test_list_memories(self, client: AsyncClient, auth_headers: dict):
         """测试获取记忆列表"""
         response = await client.get(
-            "/api/v1/memories/",
+            "/api/v1/memory/",
             headers=auth_headers
         )
         assert response.status_code == 200
@@ -128,7 +128,7 @@ class TestMemory:
     async def test_search_memories(self, client: AsyncClient, auth_headers: dict):
         """测试搜索记忆"""
         response = await client.post(
-            "/api/v1/memories/search",
+            "/api/v1/memory/search",
             json={"query": "家人", "top_k": 10},
             headers=auth_headers
         )

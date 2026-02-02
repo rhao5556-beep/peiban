@@ -11,6 +11,7 @@
 
 - `OPENAI_API_KEY`：OpenAI 兼容 API Key（仅在启用 Judge 时需要；本项目默认使用硅基流动）
 - `OPENAI_BASE_URL`：OpenAI 兼容 Base URL（例如硅基流动：`https://api.siliconflow.cn/v1`）
+- `OPENAI_API_BASE`：同上，部分脚本使用该变量名（推荐两者都填，或至少确保其中一个存在）
 - `AFFINITY_EVAL_OPENAI_API_KEY`：用于评测裁判/基线的 Key（推荐用这个，避免和后端的 Key 冲突）
 - `AFFINITY_EVAL_OPENAI_BASE_URL`：用于评测裁判/基线的 Base URL（例如 `https://api.siliconflow.cn/v1`）
 - `AFFINITY_EVAL_BACKEND_BASE_URL`：后端地址（默认 `http://localhost:8010`）

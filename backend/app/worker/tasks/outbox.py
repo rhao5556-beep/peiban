@@ -130,22 +130,10 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
             else:
                 # 超过重试次数，标记 pending_review，但仍然提交记忆（避免前端一直显示"记忆中..."）
                 logger.error(f"LLM extraction failed after {retry_count + 1} attempts, marking pending_review but committing memory")
-
-                try:
-                    write_to_milvus_sync(
-                        memory_id=memory_id,
-                        user_id=user_id,
-                        content=content,
-                        embedding=embedding,
-                        valence=payload.get("valence", 0),
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to write to Milvus in pending_review branch: {e}")
                 db.execute(
                     text("""
                         UPDATE outbox_events 
                         SET status = 'pending_review', 
-                            error_message = :error,
                             error_message = :error,
                             processed_at = NOW()
                         WHERE event_id = :event_id
@@ -207,6 +195,39 @@ def process_outbox_event(self, event_id: str, payload: Dict[str, Any]):
             metadata=extraction_result.metadata,
             conversation_id=payload.get("conversation_id")
         )
+
+        try:
+            memory_entities_rows = []
+            for ent in validated_entities:
+                if ent.get("is_user") or ent.get("id") == "user":
+                    continue
+                ent_id = ent.get("id")
+                if not ent_id:
+                    continue
+                memory_entities_rows.append(
+                    {
+                        "user_id": user_id,
+                        "memory_id": memory_id,
+                        "entity_id": str(ent_id),
+                        "entity_name": ent.get("name"),
+                        "entity_type": ent.get("type"),
+                        "confidence": float(ent.get("confidence") or 0.8),
+                    }
+                )
+
+            if memory_entities_rows:
+                db.execute(
+                    text(
+                        """
+                        INSERT INTO memory_entities (user_id, memory_id, entity_id, entity_name, entity_type, confidence, source)
+                        VALUES (:user_id, :memory_id, :entity_id, :entity_name, :entity_type, :confidence, 'llm')
+                        ON CONFLICT (user_id, memory_id, entity_id) DO NOTHING
+                        """
+                    ),
+                    memory_entities_rows,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to write memory_entities: {e}")
         
         # 7. 更新 Outbox 状态为 done
         db.execute(

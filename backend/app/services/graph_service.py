@@ -6,6 +6,8 @@ from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field
 import logging
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,6 +69,8 @@ class GraphService:
     def __init__(self, neo4j_driver=None):
         self.driver = neo4j_driver
         self.default_decay_rate = 0.2 / 30  # 默认：一般关系，每月衰减0.2
+        self.read_timeout_s = 5.0
+        self.write_timeout_s = max(10.0, float(settings.LLM_REQUEST_TIMEOUT_S))
     
     async def merge_subgraph(
         self,
@@ -152,9 +156,15 @@ class GraphService:
             e.created = false
         RETURN e.created AS created
         """
-        result = await tx.run(query, entity_id=entity_id, user_id=user_id, 
-                             name=name, entity_type=entity_type, 
-                             conversation_id=conversation_id)
+        result = await tx.run(
+            query,
+            entity_id=entity_id,
+            user_id=user_id,
+            name=name,
+            entity_type=entity_type,
+            conversation_id=conversation_id,
+            timeout=10.0,
+        )
         record = await result.single()
         return record["created"] if record else False
     
@@ -182,9 +192,16 @@ class GraphService:
             r.created = false
         RETURN r.created AS created
         """
-        result = await tx.run(query, edge_id=edge_id, source_id=source_id,
-                             target_id=target_id, relation_type=relation_type,
-                             decay_rate=decay_rate, conversation_id=conversation_id)
+        result = await tx.run(
+            query,
+            edge_id=edge_id,
+            source_id=source_id,
+            target_id=target_id,
+            relation_type=relation_type,
+            decay_rate=decay_rate,
+            conversation_id=conversation_id,
+            timeout=10.0,
+        )
         record = await result.single()
         return record["created"] if record else False
     
@@ -220,7 +237,12 @@ class GraphService:
             ORDER BY current_weight DESC
             LIMIT 50
             """
-            result = await session.run(query, entity_id=entity_id, min_weight=min_weight)
+            result = await session.run(
+                query,
+                entity_id=entity_id,
+                min_weight=min_weight,
+                timeout=self.read_timeout_s,
+            )
             
             entities = []
             async for record in result:
@@ -252,7 +274,7 @@ class GraphService:
             WHERE NOT e:User
             RETURN e
             """
-            nodes_result = await session.run(nodes_query, user_id=user_id)
+            nodes_result = await session.run(nodes_query, user_id=user_id, timeout=self.read_timeout_s)
             nodes = []
             async for record in nodes_result:
                 nodes.append(self._node_to_dict(record["e"]))
@@ -276,7 +298,7 @@ class GraphService:
                              duration.inDays(r.updated_at, datetime()).days)
                         ELSE coalesce(r.weight, 0.5) END AS current_weight
             """
-            edges_result = await session.run(user_edges_query, user_id=user_id)
+            edges_result = await session.run(user_edges_query, user_id=user_id, timeout=self.read_timeout_s)
             edges = []
             async for record in edges_result:
                 edge_dict = self._edge_to_dict(record["r"], record["current_weight"])
@@ -297,7 +319,7 @@ class GraphService:
                              duration.inDays(r.updated_at, datetime()).days)
                         ELSE coalesce(r.weight, 0.5) END AS current_weight
             """
-            entity_edges_result = await session.run(entity_edges_query, user_id=user_id)
+            entity_edges_result = await session.run(entity_edges_query, user_id=user_id, timeout=self.read_timeout_s)
             async for record in entity_edges_result:
                 edge_dict = self._edge_to_dict(record["r"], record["current_weight"])
                 edge_dict["source_id"] = record["source_id"]
@@ -363,8 +385,12 @@ class GraphService:
                 r.provenance = r.provenance + $conversation_id
             RETURN r, startNode(r) AS source, endNode(r) AS target
             """
-            result = await session.run(query, edge_id=edge_id, 
-                                       conversation_id=conversation_id)
+            result = await session.run(
+                query,
+                edge_id=edge_id,
+                conversation_id=conversation_id,
+                timeout=self.read_timeout_s,
+            )
             record = await result.single()
             
             if not record:
@@ -407,7 +433,7 @@ class GraphService:
             ORDER BY current_weight ASC
             LIMIT 20
             """
-            result = await session.run(query, user_id=user_id, threshold=threshold)
+            result = await session.run(query, user_id=user_id, threshold=threshold, timeout=self.read_timeout_s)
             
             edges = []
             async for record in result:
@@ -450,7 +476,7 @@ class GraphService:
             DELETE r
             RETURN count(r) AS deleted_count
             """
-            result = await session.run(query, user_id=user_id)
+            result = await session.run(query, user_id=user_id, timeout=self.read_timeout_s)
             record = await result.single()
             return record["deleted_count"] if record else 0
 

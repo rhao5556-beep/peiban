@@ -4,19 +4,19 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
 import uuid
+import time
 import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user
-from app.core.database import get_db, get_neo4j_driver, get_milvus_collection, get_redis_client
+from app.core.database import get_db, get_neo4j_driver, get_milvus_collection
 from app.core.ids import normalize_uuid
 from app.models.session import Session, ConversationTurn
 from app.services.conversation_service import ConversationService, ConversationMode
 from app.services.affinity_service import AffinityService
 from app.services.retrieval_service import RetrievalService
 from app.services.graph_service import GraphService
-from app.services.outbox_service import TransactionManager, IdempotencyChecker
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -28,11 +28,9 @@ class MessageRequest(BaseModel):
     session_id: Optional[str] = None
     idempotency_key: Optional[str] = None
     mode: Literal["graph_only", "hybrid"] = "hybrid"  # 对话模式
-    remember: bool = True
-    memorize_only: bool = False
     eval_mode: bool = False
-    retrieval_mode: Literal["off", "vector", "graph", "both"] = "both"
-    force_tier: Optional[int] = None
+    answer_style: Optional[str] = None
+    eval_task_type: Optional[str] = None
 
 
 class MessageResponse(BaseModel):
@@ -45,8 +43,7 @@ class MessageResponse(BaseModel):
     memories_used: list
     tone_type: str
     response_time_ms: float
-    memory_id: Optional[str] = None
-    memory_status: str = "disabled"  # pending, committed, pending_review, duplicate, disabled, error
+    memory_status: str = "pending"  # pending, committed
     mode: str = "hybrid"  # graph_only 或 hybrid
     context_source: Optional[dict] = None  # 上下文来源追踪
 
@@ -71,10 +68,22 @@ async def send_message(
     Fast Path: 情感分析 + 检索 + 生成
     Slow Path: 异步写入记忆（通过 Outbox）
     """
+    started = time.perf_counter()
+    request_id = uuid.uuid4().hex
     user_id = normalize_uuid(current_user["user_id"])
     session_id = normalize_uuid(request.session_id) if request.session_id else str(uuid.uuid4())
     
     try:
+        logger.info(
+            "conversation_request_received",
+            extra={
+                "request_id": request_id,
+                "user_id": user_id,
+                "session_id": session_id,
+                "mode": request.mode,
+                "message_len": len(request.message or ""),
+            },
+        )
         session_uuid = uuid.UUID(session_id)
         user_uuid = uuid.UUID(user_id)
         session_row = (
@@ -86,9 +95,7 @@ async def send_message(
 
         # 初始化服务
         neo4j_driver = get_neo4j_driver()
-        milvus_collection = None
-        if request.retrieval_mode in ("vector", "both"):
-            milvus_collection = get_milvus_collection()
+        milvus_collection = get_milvus_collection()
         
         graph_service = GraphService(neo4j_driver=neo4j_driver)
         retrieval_service = RetrievalService(
@@ -97,15 +104,10 @@ async def send_message(
         )
         affinity_service = AffinityService()
         
-        transaction_manager = TransactionManager(db_session=db)
-        idempotency_checker = IdempotencyChecker(redis_client=get_redis_client())
-
         conversation_service = ConversationService(
             affinity_service=affinity_service,
             retrieval_service=retrieval_service,
-            graph_service=graph_service,
-            transaction_manager=transaction_manager,
-            idempotency_checker=idempotency_checker,
+            graph_service=graph_service
         )
         
         # 调用对话服务（传递 mode 参数实现物理隔离）
@@ -113,13 +115,11 @@ async def send_message(
             user_id=user_id,
             message=request.message,
             session_id=session_id,
-            mode=request.mode,
-            remember=bool(request.remember),
-            memorize_only=bool(request.memorize_only),
-            idempotency_key=request.idempotency_key,
+            mode=request.mode,  # graph_only 或 hybrid
+            request_id=request_id,
             eval_mode=bool(request.eval_mode),
-            retrieval_mode=str(request.retrieval_mode),
-            force_tier=request.force_tier,
+            answer_style=request.answer_style,
+            eval_task_type=request.eval_task_type,
         )
         
         return MessageResponse(
@@ -131,14 +131,24 @@ async def send_message(
             memories_used=response.memories_used,
             tone_type=response.tone_type,
             response_time_ms=response.response_time_ms,
-            memory_id=response.memory_id,
-            memory_status=response.memory_status or "disabled",
+            memory_status="pending",
             mode=response.mode,
             context_source=response.context_source
         )
         
     except Exception as e:
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
         logger.error(f"Conversation processing failed: {e}", exc_info=True)
+        logger.error(
+            "conversation_request_failed",
+            extra={
+                "request_id": request_id,
+                "user_id": user_id,
+                "session_id": session_id,
+                "mode": request.mode,
+                "elapsed_ms": elapsed_ms,
+            },
+        )
         # 降级响应
         return MessageResponse(
             reply=f"抱歉，处理消息时出现了问题。请稍后再试。",

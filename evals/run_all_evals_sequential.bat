@@ -7,11 +7,9 @@ echo Running All Evaluations Sequentially
 echo ========================================
 echo.
 
-REM Check backend
-curl -s http://localhost:8000/health >nul 2>&1
+python evals/check_eval_env.py --backend_base_url http://localhost:8000 --timeout_s 10 --skip_judge_probe
 if errorlevel 1 (
-    echo ERROR: Backend is not running!
-    exit /b 1
+    exit /b %errorlevel%
 )
 
 echo [1/3] Running LoCoMo Evaluation...
@@ -31,7 +29,21 @@ timeout /t 10 /nobreak
 echo.
 echo [2/3] Running KnowMeBench Evaluation...
 echo.
-python affinity_evals/knowmebench/run_dataset1_pipeline.py --limit_samples 50
+if exist affinity_evals\knowmebench\run_dataset1_pipeline.py (
+    python affinity_evals/knowmebench/run_dataset1_pipeline.py --limit_samples 50
+) else (
+    set KM_PIPE=
+    for /f "delims=" %%i in ('dir /b affinity_evals\knowmebench\__pycache__\run_dataset1_pipeline.*.pyc 2^>nul') do (
+        set KM_PIPE=affinity_evals\knowmebench\__pycache__\%%i
+        goto km_found
+    )
+    :km_found
+    if not defined KM_PIPE (
+        echo ERROR: KnowMeBench pipeline entry not found!
+        exit /b 1
+    )
+    python %KM_PIPE% --limit_samples 50
+)
 if errorlevel 1 (
     echo ERROR: KnowMeBench evaluation failed!
     exit /b 1

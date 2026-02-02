@@ -1,6 +1,5 @@
 """数据库连接管理"""
 import asyncio
-import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from sqlalchemy import text
@@ -9,8 +8,6 @@ from pymilvus import connections, Collection
 import redis.asyncio as redis
 
 from app.core.config import settings
-
-logger = logging.getLogger(__name__)
 
 
 async def wait_for_postgres(max_retries: int = 30, delay: float = 2.0):
@@ -173,12 +170,7 @@ def get_redis_client():
     return redis_client
 
 
-def get_milvus_collection(name: str = None):
+def get_milvus_collection(name: str = None) -> Collection:
+    """获取 Milvus Collection"""
     collection_name = name or settings.MILVUS_COLLECTION
-    if not milvus_connected:
-        return None
-    try:
-        return Collection(collection_name)
-    except Exception as e:
-        logger.warning(f"Milvus unavailable, vector retrieval disabled: {e}")
-        return None
+    return Collection(collection_name)

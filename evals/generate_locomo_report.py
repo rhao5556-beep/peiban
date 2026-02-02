@@ -3,6 +3,7 @@ Generate human-readable LoCoMo evaluation report
 """
 import argparse
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -254,7 +255,10 @@ def main() -> None:
     
     print(f"Report generated: {output_path}")
     print("\n" + "="*60)
-    print(report)
+    try:
+        print(report)
+    except UnicodeEncodeError:
+        sys.stdout.buffer.write(report.encode("utf-8", errors="replace") + b"\n")
 
 
 if __name__ == "__main__":

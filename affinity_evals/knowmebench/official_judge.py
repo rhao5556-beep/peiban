@@ -2,30 +2,39 @@ import argparse
 import json
 import os
 import random
-import re
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urljoin
 
 import requests
-
 
 try:
     from dotenv import load_dotenv
 
-    _env_path = Path(__file__).resolve().parents[2] / "evals" / ".env.local"
-    if _env_path.exists():
-        load_dotenv(_env_path)
+    project_root = Path(__file__).resolve().parents[2]
+    env_path = project_root / "evals" / ".env.local"
+    if env_path.exists():
+        load_dotenv(env_path)
 except Exception:
     pass
 
 
-_TYPE_RE = re.compile(r"^\s*#\s*type\s+(?P<types>.+?)\s*$", re.IGNORECASE)
-_WS_RE = re.compile(r"\s+")
+def _first_env(*names: str) -> Optional[str]:
+    for n in names:
+        v = os.environ.get(n)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
+def _sleep_backoff(attempt: int, cap_s: float) -> None:
+    base = 1.6 ** attempt
+    jitter = random.random() * 0.6
+    time.sleep(min(float(cap_s), base + jitter))
 
 
 def _load_json(path: Path) -> Any:
@@ -33,73 +42,79 @@ def _load_json(path: Path) -> Any:
         return json.load(f)
 
 
-def _sleep_backoff(attempt: int, cap_s: float) -> None:
-    base = 1.6 ** attempt
-    jitter = random.random() * 0.4
-    time.sleep(min(cap_s, base + jitter))
+def _dump_json(path: Path, obj: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _split_types(s: str) -> List[str]:
-    raw = (s or "").strip()
-    if not raw:
-        return []
-    parts = re.split(r"[、,]", raw)
-    out = []
-    for p in parts:
-        x = p.strip()
-        if x:
-            out.append(x)
-    return out
+def _find_items(input_dir: Path) -> List[Dict[str, Any]]:
+    merged = input_dir / "merged_for_official_eval.json"
+    if merged.exists():
+        data = _load_json(merged)
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+
+    items: List[Dict[str, Any]] = []
+    for p in sorted(input_dir.glob("knowmebench.dataset1.*.model_outputs.json")):
+        data = _load_json(p)
+        if isinstance(data, list):
+            items.extend([x for x in data if isinstance(x, dict)])
+    return items
 
 
-def parse_prompt_file(prompt_path: Path) -> Dict[str, str]:
-    text = prompt_path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    current_types: List[str] = []
-    current_block: List[str] = []
-    out: Dict[str, str] = {}
-
-    def _flush() -> None:
-        nonlocal current_types, current_block
-        if not current_types:
-            current_block = []
-            return
-        content = "\n".join(current_block).strip()
-        if content:
-            for t in current_types:
-                out[t] = content
-        current_types = []
-        current_block = []
-
-    for line in lines:
-        m = _TYPE_RE.match(line)
-        if m:
-            _flush()
-            current_types = _split_types(m.group("types"))
-            current_block = []
-            continue
-        current_block.append(line)
-
-    _flush()
-    return out
+def _extract_fields(it: Dict[str, Any]) -> Tuple[int, str, str, str]:
+    qid = int(it.get("id") or 0)
+    task_type = str(it.get("task_type") or "")
+    question = str(it.get("question") or "")
+    reference = str(it.get("reference_answer") or "")
+    model_answer = str(it.get("model_answer") or "")
+    prompt = (
+        "You are a strict evaluator for long-term memory tasks.\n"
+        "Score the model answer against the reference on a 0-5 integer scale.\n\n"
+        "Rubric:\n"
+        "- 5: Fully correct, no fabrication, matches key facts.\n"
+        "- 3: Partially correct; minor mistakes or missing details.\n"
+        "- 1: Mostly incorrect or major mistakes.\n"
+        "- 0: Fabricated or contradicts the reference.\n\n"
+        f"Task Type: {task_type}\n"
+        f"Question: {question}\n"
+        f"Reference Answer: {reference}\n"
+        f"Model Answer: {model_answer}\n\n"
+        'Return JSON only: {"score": 0-5, "reasoning": "short"}\n'
+    )
+    return qid, task_type, prompt, reference
 
 
-def _normalize_task_type(s: str) -> str:
-    return _WS_RE.sub(" ", (s or "").strip())
-
-
-def _render_prompt(template: str, question: str, reference_answer: str, model_answer: str) -> str:
-    p = template
-    p = p.replace("{{question}}", question or "")
-    p = p.replace("{{reference_answer}}", reference_answer or "")
-    p = p.replace("{{model_answer}}", model_answer or "")
-    return p
+def _parse_judge_json(text: str) -> Tuple[int, str]:
+    t = (text or "").strip()
+    if t.startswith("```json"):
+        t = t[7:]
+    if t.startswith("```"):
+        t = t[3:]
+    if t.endswith("```"):
+        t = t[:-3]
+    t = t.strip()
+    try:
+        obj = json.loads(t)
+    except Exception:
+        return 0, f"judge_non_json: {t[:200]}"
+    score = obj.get("score")
+    reasoning = obj.get("reasoning")
+    try:
+        score_i = int(score)
+    except Exception:
+        score_i = 0
+    if score_i < 0:
+        score_i = 0
+    if score_i > 5:
+        score_i = 5
+    return score_i, str(reasoning or "").strip()
 
 
 _thread_local = threading.local()
 
 
-def _get_thread_session() -> requests.Session:
+def _get_session() -> requests.Session:
     s = getattr(_thread_local, "session", None)
     if s is None:
         s = requests.Session()
@@ -107,264 +122,119 @@ def _get_thread_session() -> requests.Session:
     return s
 
 
-def _chat_completions_url(api_base: str) -> str:
-    base = (api_base or "").strip()
-    if not base:
-        raise ValueError("api_base is empty")
-    base = base.rstrip("/")
-    if base.endswith("/chat/completions"):
-        return base
-    if base.endswith("/v1"):
-        return f"{base}/chat/completions"
-    return f"{base}/v1/chat/completions"
+@dataclass(frozen=True)
+class JudgeConfig:
+    api_key: str
+    api_base: str
+    model: str
+    timeout_s: float
 
 
-def _call_judge(
-    session: requests.Session,
-    api_key: str,
-    api_base: str,
-    model: str,
-    prompt: str,
-    request_timeout_s: float,
-) -> str:
-    url = _chat_completions_url(api_base)
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload: Dict[str, Any] = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a strict evaluator. Output ONLY valid JSON.",
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0,
+def _call_judge(cfg: JudgeConfig, prompt: str) -> Tuple[int, str]:
+    url = urljoin(cfg.api_base.rstrip("/") + "/", "chat/completions")
+    payload = {
+        "model": cfg.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "max_tokens": 300,
     }
     last_error: Exception | None = None
-    for attempt in range(6):
+    for attempt in range(8):
         try:
-            resp = session.post(url, headers=headers, json=payload, timeout=float(request_timeout_s))
+            s = _get_session()
+            resp = s.post(
+                url,
+                headers={"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=float(cfg.timeout_s),
+            )
             if resp.status_code == 429 or resp.status_code >= 500:
                 raise requests.HTTPError(f"{resp.status_code} {resp.text}", response=resp)
             resp.raise_for_status()
-            data = resp.json()
-            choices = data.get("choices") or []
-            if not choices:
-                raise RuntimeError(f"no_choices: {data}")
-            msg = choices[0].get("message") or {}
-            content = msg.get("content") or ""
-            return str(content)
+            content = resp.json()["choices"][0]["message"]["content"]
+            return _parse_judge_json(str(content))
         except Exception as e:
             last_error = e
-            if attempt >= 5:
+            if attempt >= 7:
                 break
-            _sleep_backoff(attempt, cap_s=12.0)
-    raise RuntimeError(f"judge_request_failed: {last_error}")
+            _sleep_backoff(attempt, cap_s=25.0)
+    return 0, f"judge_error: {last_error}"
 
 
-_JSON_OBJ_RE = re.compile(r"\{[\s\S]*\}")
-_SCORE_RE = re.compile(r"\"?score\"?\s*:\s*(\d+)")
-
-
-def _extract_json_object(text: str) -> Optional[dict]:
-    raw = (text or "").strip()
-    if not raw:
-        return None
-    try:
-        x = json.loads(raw)
-        if isinstance(x, dict):
-            return x
-    except Exception:
-        pass
-    m = _JSON_OBJ_RE.search(raw)
-    if not m:
-        return None
-    try:
-        x = json.loads(m.group(0))
-        return x if isinstance(x, dict) else None
-    except Exception:
-        return None
-
-
-def _parse_score_and_reasoning(text: str) -> Tuple[Optional[int], str]:
-    obj = _extract_json_object(text)
-    if obj is not None:
-        score = obj.get("score")
-        reasoning = obj.get("reasoning")
-        try:
-            s_int = int(score) if score is not None else None
-        except Exception:
-            s_int = None
-        r = str(reasoning) if reasoning is not None else (text or "").strip()
-        return s_int, r
-
-    raw = (text or "").strip()
-    m = _SCORE_RE.search(raw)
-    if m:
-        try:
-            return int(m.group(1)), raw
-        except Exception:
-            pass
-    return None, raw
-
-
-@dataclass
-class JudgeResult:
-    idx: int
-    score: Optional[int]
-    reasoning: str
-    status: str
-    error: Optional[str] = None
-
-
-def main() -> int:
+def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--input_dir", required=True)
     p.add_argument("--output_file", required=True)
-    p.add_argument(
-        "--prompt_path",
-        default=str((Path(__file__).resolve().parents[2] / "external" / "KnowMeBench" / "evaluate" / "evaluate prompt.md").resolve()),
-    )
     p.add_argument("--concurrency", type=int, default=4)
-    p.add_argument("--request_timeout_s", type=float, default=120.0)
-    p.add_argument("--api_key", default=os.environ.get("OPENAI_API_KEY"))
-    p.add_argument("--api_base", default=os.environ.get("OPENAI_API_BASE", "https://api.siliconflow.cn/v1"))
-    p.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "deepseek-ai/DeepSeek-V3"))
+    p.add_argument("--timeout_s", type=float, default=30.0)
+    p.add_argument("--api_key", default=_first_env("AFFINITY_EVAL_OPENAI_API_KEY", "OPENAI_API_KEY"))
+    p.add_argument(
+        "--api_base",
+        default=_first_env("AFFINITY_EVAL_OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_BASE_URL"),
+    )
+    p.add_argument("--judge_model", default=_first_env("AFFINITY_EVAL_JUDGE_MODEL", "OPENAI_MODEL"))
+    p.add_argument("--force", action="store_true", default=False)
     args = p.parse_args()
 
-    in_dir = Path(args.input_dir)
-    merged_path = in_dir / "merged_for_official_eval.json"
-    if not merged_path.exists():
-        raise SystemExit(f"merged_for_official_eval.json not found in: {in_dir}")
+    input_dir = Path(args.input_dir)
+    out_path = Path(args.output_file)
 
-    items: List[Dict[str, Any]] = list(_load_json(merged_path))
-    prompt_map = parse_prompt_file(Path(args.prompt_path))
+    if out_path.exists() and not args.force:
+        print(f"SKIP: judge_results_exists: {out_path}")
+        return
 
-    started_at = datetime.now().strftime("%Y%m%d_%H%M%S")
-    meta: Dict[str, Any] = {
-        "started_at": started_at,
-        "prompt_path": str(Path(args.prompt_path).resolve()),
-        "judge_model": args.model,
-        "total_items": len(items),
-        "evaluated_items": 0,
-        "average_score": 0.0,
-        "status_counts": {},
-    }
+    if not args.api_key or not args.api_base or not args.judge_model:
+        raise SystemExit("missing judge config: api_key/api_base/judge_model")
 
-    if not args.api_key:
-        meta["note"] = "OPENAI_API_KEY not set; all items will be skipped with status=api_config_missing"
-
-    def _run_one(idx: int, it: Dict[str, Any]) -> JudgeResult:
-        task_type = _normalize_task_type(str(it.get("task_type") or ""))
-        question = str(it.get("question") or "")
-        ref = str(it.get("reference_answer") or "")
-        pred = str(it.get("model_answer") or "")
-
-        if not pred.strip():
-            return JudgeResult(idx=idx, score=0, reasoning="Empty/irrelevant answer", status="ok")
-
-        tmpl = prompt_map.get(task_type)
-        if not tmpl:
-            return JudgeResult(
-                idx=idx,
-                score=0,
-                reasoning=f"Task type not found in prompt file: {task_type}",
-                status="skipped_unknown_task",
-            )
-
-        if not args.api_key:
-            return JudgeResult(
-                idx=idx,
-                score=0,
-                reasoning="Missing OPENAI_API_KEY",
-                status="api_config_missing",
-            )
-
-        prompt = _render_prompt(tmpl, question=question, reference_answer=ref, model_answer=pred)
-        try:
-            session = _get_thread_session()
-            out_text = _call_judge(
-                session=session,
-                api_key=str(args.api_key),
-                api_base=str(args.api_base),
-                model=str(args.model),
-                prompt=prompt,
-                request_timeout_s=float(args.request_timeout_s),
-            )
-            score, reasoning = _parse_score_and_reasoning(out_text)
-            if score is None:
-                return JudgeResult(
-                    idx=idx,
-                    score=0,
-                    reasoning=f"Parse error. Raw: {out_text[:4000]}",
-                    status="parse_error",
-                )
-            return JudgeResult(idx=idx, score=int(score), reasoning=reasoning, status="ok")
-        except Exception as e:
-            return JudgeResult(
-                idx=idx,
-                score=0,
-                reasoning=f"API error: {e}",
-                status="api_error",
-                error=f"{e.__class__.__name__}: {e}",
-            )
-
-    results: List[Optional[JudgeResult]] = [None] * len(items)
-    done = 0
+    items = _find_items(input_dir)
     total = len(items)
-    with ThreadPoolExecutor(max_workers=max(1, int(args.concurrency))) as ex:
-        fut_to_idx = {ex.submit(_run_one, idx, it): idx for idx, it in enumerate(items)}
-        pending = set(fut_to_idx.keys())
-        last_heartbeat = time.time()
-        while pending:
-            done_set, pending = wait(pending, timeout=15.0, return_when=FIRST_COMPLETED)
-            if not done_set:
-                now = time.time()
-                if now - last_heartbeat >= 15.0:
-                    print(f"[{done}/{total}] judging...", flush=True)
-                    last_heartbeat = now
-                continue
-            for fut in done_set:
-                idx = fut_to_idx[fut]
-                results[idx] = fut.result()
-                done += 1
-                if done <= 5 or done % 10 == 0 or done == total:
-                    print(f"[{done}/{total}] ok", flush=True)
+    if total == 0:
+        raise SystemExit(f"no items to judge in: {input_dir}")
+
+    print(f"Judge start: items={total} concurrency={int(args.concurrency)} model={args.judge_model}", flush=True)
+    cfg = JudgeConfig(
+        api_key=str(args.api_key),
+        api_base=str(args.api_base),
+        model=str(args.judge_model),
+        timeout_s=float(args.timeout_s),
+    )
 
     details: List[Dict[str, Any]] = []
-    scores: List[int] = []
-    status_counts: Dict[str, int] = {}
+    score_sum = 0
     evaluated = 0
 
-    for idx, it in enumerate(items):
-        r = results[idx] or JudgeResult(idx=idx, score=0, reasoning="missing_result", status="internal_error")
-        status_counts[r.status] = status_counts.get(r.status, 0) + 1
-        if r.status == "ok":
+    def _run_one(it: Dict[str, Any]) -> Dict[str, Any]:
+        qid = int(it.get("id") or 0)
+        task_type = str(it.get("task_type") or "")
+        _, _, prompt, _ = _extract_fields(it)
+        score, reasoning = _call_judge(cfg, prompt=prompt)
+        status = "ok" if reasoning and not reasoning.startswith("judge_error") else "err"
+        return {"id": qid, "task_type": task_type, "score": int(score), "reasoning": reasoning, "status": status}
+
+    with ThreadPoolExecutor(max_workers=max(1, int(args.concurrency))) as ex:
+        futs = [ex.submit(_run_one, it) for it in items]
+        for i, fut in enumerate(as_completed(futs), start=1):
+            r = fut.result()
+            details.append(r)
             evaluated += 1
-            if r.score is not None:
-                scores.append(int(r.score))
-        details.append(
-            {
-                "id": it.get("id"),
-                "task_type": it.get("task_type"),
-                "score": r.score,
-                "reasoning": r.reasoning,
-                "status": "success" if r.status == "ok" else r.status,
-            }
-        )
+            score_sum += int(r.get("score") or 0)
+            if i <= 5 or i % 5 == 0 or i == total:
+                print(f"[{i}/{total}] id={r.get('id')} score={r.get('score')} status={r.get('status')}", flush=True)
 
-    meta["evaluated_items"] = evaluated
-    meta["status_counts"] = dict(sorted(status_counts.items(), key=lambda kv: kv[0]))
-    meta["average_score"] = (sum(scores) / len(scores)) if scores else 0.0
-
-    out = {"meta": meta, "details": details}
-    out_path = Path(args.output_file)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(str(out_path))
-    return 0
+    details.sort(key=lambda x: (str(x.get("task_type") or ""), int(x.get("id") or 0)))
+    avg_score = (score_sum / evaluated) if evaluated else 0.0
+    out = {
+        "meta": {
+            "judge_model": str(args.judge_model),
+            "total_items": total,
+            "evaluated_items": evaluated,
+            "average_score": avg_score,
+        },
+        "details": details,
+    }
+    _dump_json(out_path, out)
+    print(f"Wrote: {out_path}", flush=True)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
-
+    main()

@@ -59,6 +59,20 @@ CREATE TABLE memories (
     committed_at TIMESTAMP
 );
 
+-- 记忆-实体桥接表（用于实体扩展检索）
+CREATE TABLE memory_entities (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    memory_id UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    entity_id VARCHAR(128) NOT NULL,
+    entity_name TEXT,
+    entity_type VARCHAR(50),
+    confidence FLOAT DEFAULT 0.8,
+    source VARCHAR(50) DEFAULT 'llm',
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(user_id, memory_id, entity_id)
+);
+
 -- Outbox事件表（异步写入模式）
 CREATE TABLE outbox_events (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -112,6 +126,9 @@ CREATE INDEX idx_outbox_status ON outbox_events(status) WHERE status = 'pending'
 CREATE INDEX idx_outbox_idempotency ON outbox_events(idempotency_key);
 CREATE INDEX idx_memories_status ON memories(status);
 CREATE INDEX idx_memories_user ON memories(user_id);
+CREATE INDEX idx_memory_entities_user_entity ON memory_entities(user_id, entity_id);
+CREATE INDEX idx_memory_entities_memory ON memory_entities(memory_id);
+CREATE INDEX idx_memory_entities_user_created ON memory_entities(user_id, created_at DESC);
 CREATE INDEX idx_idempotency_expires ON idempotency_keys(expires_at);
 CREATE INDEX idx_sessions_user ON sessions(user_id);
 CREATE INDEX idx_turns_session ON conversation_turns(session_id);

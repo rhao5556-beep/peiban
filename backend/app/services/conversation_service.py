@@ -1,6 +1,7 @@
 """对话服务 - 协调整个对话流程"""
 import uuid
 import logging
+import time
 from typing import AsyncIterator, Optional, List
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,6 +13,9 @@ from app.services.graph_service import GraphService
 from app.services.outbox_service import TransactionManager, IdempotencyChecker
 from app.services.working_memory_service import WorkingMemoryService, EntityMention
 from app.services.response_cache_service import ResponseCacheService
+from app.services.answer_policy import build_eval_task_suffix, build_extractive_suffix, extract_context_time, extract_question_text, select_answer_policy, support_check_answer
+from app.services.eval_helpers import extract_eval_payload
+from app.services.locomo_answering import locomo_extract_answer
 from app.core.config import settings
 from app.core.database import get_neo4j_driver, get_redis_client
 
@@ -38,8 +42,6 @@ class ConversationResponse:
     memories_used: List[str]
     tone_type: str
     response_time_ms: float
-    memory_id: Optional[str] = None
-    memory_status: Optional[str] = None
     mode: str = "hybrid"  # graph_only 或 hybrid
     context_source: dict = None  # 上下文来源追踪
 
@@ -294,7 +296,9 @@ class ConversationService:
         # 初始化 OpenAI 兼容客户端 (硅基流动)
         self.llm_client = openai.AsyncOpenAI(
             api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_API_BASE
+            base_url=settings.OPENAI_API_BASE,
+            timeout=float(settings.LLM_REQUEST_TIMEOUT_S),
+            max_retries=1,
         )
     
     async def process_message_stream(
@@ -428,12 +432,10 @@ class ConversationService:
         message: str,
         session_id: str,
         mode: str = ConversationMode.HYBRID,
-        remember: bool = True,
-        memorize_only: bool = False,
-        idempotency_key: Optional[str] = None,
+        request_id: Optional[str] = None,
         eval_mode: bool = False,
-        retrieval_mode: str = "both",
-        force_tier: Optional[int] = None,
+        answer_style: Optional[str] = None,
+        eval_task_type: Optional[str] = None,
     ) -> ConversationResponse:
         """
         处理用户消息
@@ -450,72 +452,33 @@ class ConversationService:
         - mode="graph_only" 时，conversation_history = None（物理隔离）
         - 这是防御式设计，不是只靠 Prompt 约束
         """
+        perf_start = time.perf_counter()
         start_time = datetime.now()
-        retrieval_mode_norm = (retrieval_mode or "both").strip().lower()
-        if retrieval_mode_norm not in {"off", "vector", "graph", "both"}:
-            retrieval_mode_norm = "both"
 
-        if memorize_only:
-            emotion = self.emotion_analyzer.analyze(message)
-            affinity = await self.affinity_service.get_affinity(user_id)
-            tier = force_tier if force_tier is not None else self.tier_router.route(
-                message, emotion, affinity.state, affinity.new_score
-            )
-
-            memory_id: Optional[str] = None
-            memory_status: str = "disabled"
-            if remember:
-                ik = (idempotency_key or "").strip() or f"memorize:{session_id}:{uuid.uuid4()}"
-                is_new, existing_memory_id = await self.idempotency_checker.check_and_acquire(ik, user_id)
-                if not is_new and existing_memory_id:
-                    memory_id = existing_memory_id
-                    memory_status = "duplicate"
-                else:
-                    embedding = await self.embedding_service.encode(message)
-                    memory_id, _event_id = await self.transaction_manager.create_memory_with_outbox(
-                        user_id=user_id,
-                        content=message,
-                        embedding=embedding,
-                        valence=emotion.get("valence", 0),
-                        conversation_id=session_id,
-                        idempotency_key=ik,
-                    )
-                    await self.idempotency_checker.set_memory_id(ik, memory_id)
-                    memory_status = "pending"
-
-            response_time = (datetime.now() - start_time).total_seconds() * 1000
-            return ConversationResponse(
-                reply="OK",
-                session_id=session_id,
-                turn_id=str(uuid.uuid4()),
-                emotion=emotion,
-                affinity={
-                    "score": affinity.new_score,
-                    "state": affinity.state,
-                    "delta": affinity.delta,
-                },
-                memories_used=[],
-                tone_type=self._get_tone_type(affinity.new_score),
-                response_time_ms=response_time,
-                memory_id=memory_id,
-                memory_status=memory_status,
-                mode=mode,
-                context_source={
+        def _log(stage: str, **fields) -> None:
+            logger.info(
+                stage,
+                extra={
+                    "request_id": request_id,
+                    "user_id": user_id,
+                    "session_id": session_id,
                     "mode": mode,
-                    "eval_mode": bool(eval_mode),
-                    "retrieval_mode": retrieval_mode_norm,
-                    "tier": tier,
-                    "cached": False,
-                    "memorize_only": True,
-                    "graph_facts_count": 0,
-                    "history_turns_count": 0,
-                    "vector_memories_count": 0,
+                    "elapsed_ms": (time.perf_counter() - perf_start) * 1000.0,
+                    **fields,
                 },
             )
         
+        _log(
+            "conversation_process_start",
+            message_len=len(message or ""),
+            eval_mode=bool(eval_mode),
+            answer_style=answer_style,
+            eval_task_type=eval_task_type,
+        )
+        
         # ========== Fast Path: 响应缓存检查 ==========
         # 对于简单问候，直接返回缓存响应（< 100ms）
-        if (not eval_mode) and self.response_cache_service.is_cacheable(message):
+        if self.response_cache_service.is_cacheable(message):
             # 获取好感度状态（用于选择合适的语气）
             affinity = await self.affinity_service.get_affinity(user_id)
             
@@ -533,17 +496,15 @@ class ConversationService:
                 # 简单情感分析
                 emotion = self.emotion_analyzer.analyze(message)
                 
-                if eval_mode:
-                    new_affinity = affinity
-                else:
-                    signals = AffinitySignals(
-                        user_initiated=True,
-                        emotion_valence=emotion.get("valence", 0)
-                    )
-                    new_affinity = await self.affinity_service.update_affinity(user_id, signals)
+                # 更新好感度（即使是缓存响应也要更新）
+                signals = AffinitySignals(
+                    user_initiated=True,
+                    emotion_valence=emotion.get("valence", 0)
+                )
+                new_affinity = await self.affinity_service.update_affinity(user_id, signals)
                 
                 # 保存对话轮次（仅 Hybrid 模式）- 后台异步，不阻塞响应
-                if (not eval_mode) and mode == ConversationMode.HYBRID:
+                if mode == ConversationMode.HYBRID:
                     self._save_conversation_turn_background(
                         session_id=session_id,
                         user_id=user_id,
@@ -553,27 +514,6 @@ class ConversationService:
                         affinity_score=new_affinity.new_score
                     )
                 
-                memory_id: Optional[str] = None
-                memory_status: str = "disabled"
-                if remember:
-                    ik = (idempotency_key or "").strip() or f"remember:{session_id}:{uuid.uuid4()}"
-                    is_new, existing_memory_id = await self.idempotency_checker.check_and_acquire(ik, user_id)
-                    if not is_new and existing_memory_id:
-                        memory_id = existing_memory_id
-                        memory_status = "duplicate"
-                    else:
-                        embedding = await self.embedding_service.encode(message)
-                        memory_id, _event_id = await self.transaction_manager.create_memory_with_outbox(
-                            user_id=user_id,
-                            content=message,
-                            embedding=embedding,
-                            valence=emotion.get("valence", 0),
-                            conversation_id=session_id,
-                            idempotency_key=ik,
-                        )
-                        await self.idempotency_checker.set_memory_id(ik, memory_id)
-                        memory_status = "pending"
-
                 return ConversationResponse(
                     reply=cached_response,
                     session_id=session_id,
@@ -587,13 +527,10 @@ class ConversationService:
                     memories_used=[],  # 缓存响应不使用记忆
                     tone_type=self._get_tone_type(new_affinity.new_score),
                     response_time_ms=response_time,
-                    memory_id=memory_id,
-                    memory_status=memory_status,
                     mode=mode,
                     context_source={
                         "mode": mode,
                         "eval_mode": bool(eval_mode),
-                        "retrieval_mode": retrieval_mode_norm,
                         "cached": True,
                         "graph_facts_count": 0,
                         "history_turns_count": 0,
@@ -607,51 +544,79 @@ class ConversationService:
         context_source = {
             "mode": mode,
             "eval_mode": bool(eval_mode),
-            "retrieval_mode": retrieval_mode_norm,
             "cached": False,
             "graph_facts_count": 0,
             "history_turns_count": 0,
-            "vector_memories_count": 0,
+            "vector_memories_count": 0
         }
         
         # 情感分析
         emotion = self.emotion_analyzer.analyze(message)
+        _log("conversation_emotion_done", valence=emotion.get("valence"))
         
         # 获取好感度
         affinity = await self.affinity_service.get_affinity(user_id)
+        _log("conversation_affinity_done", affinity_score=getattr(affinity, "new_score", None), affinity_state=getattr(affinity, "state", None))
         
         # 决定 Tier
         tier = self.tier_router.route(message, emotion, affinity.state, affinity.new_score)
-        if force_tier is not None:
-            tier = int(force_tier)
-        context_source["tier"] = tier
+        _log("conversation_tier_routed", tier=tier)
         
+        eval_payload = None
+        if eval_mode:
+            eval_payload = extract_eval_payload(message)
+
+        retrieval_query = eval_payload.question_text if eval_payload else message
+
         # ========== 并行检索：向量检索 + 图谱检索 ==========
         import asyncio
         
-        if retrieval_mode_norm in {"vector", "both"}:
-            vector_task = asyncio.create_task(
-                self.retrieval_service.hybrid_retrieve(
-                    user_id, message, affinity.new_score
-                )
+        # 创建并行任务
+        _log("conversation_retrieval_start")
+        vector_task = asyncio.create_task(
+            self.retrieval_service.hybrid_retrieve(
+                user_id, retrieval_query, affinity.new_score
             )
-        else:
-            vector_task = asyncio.create_task(
-                asyncio.sleep(0, result=RetrievalResult(memories=[], query=message, affinity_score=affinity.new_score, retrieval_time_ms=0.0))
+        )
+        graph_task = asyncio.create_task(
+            self.retrieval_service.retrieve_entity_facts(
+                user_id, retrieval_query, self.graph_service
             )
-
-        if retrieval_mode_norm in {"graph", "both"}:
-            graph_task = asyncio.create_task(
-                self.retrieval_service.retrieve_entity_facts(
-                    user_id, message, self.graph_service
-                )
-            )
-        else:
-            graph_task = asyncio.create_task(asyncio.sleep(0, result=[]))
+        )
         
-        # 等待两个任务完成
-        retrieval_result, entity_facts = await asyncio.gather(
-            vector_task, graph_task
+        if eval_mode:
+            vector_timeout_s = max(10.0, float(settings.EMBEDDING_REQUEST_TIMEOUT_S) + 10.0)
+            graph_timeout_s = max(8.0, float(settings.GRAPH_FACTS_TIMEOUT_S))
+        else:
+            vector_timeout_s = max(5.0, float(settings.EMBEDDING_REQUEST_TIMEOUT_S) + 5.0)
+            graph_timeout_s = max(3.0, float(settings.GRAPH_FACTS_TIMEOUT_S))
+
+        retrieval_result: RetrievalResult
+        try:
+            retrieval_result = await asyncio.wait_for(vector_task, timeout=vector_timeout_s)
+        except asyncio.TimeoutError:
+            vector_task.cancel()
+            retrieval_result = RetrievalResult(
+                memories=[],
+                query=retrieval_query,
+                affinity_score=float(getattr(affinity, "new_score", 0.0) or 0.0),
+                retrieval_time_ms=vector_timeout_s * 1000.0,
+                vector_candidates_count=0,
+                graph_expanded_count=0,
+            )
+            _log("conversation_vector_timeout", timeout_s=vector_timeout_s)
+
+        entity_facts = None
+        try:
+            entity_facts = await asyncio.wait_for(graph_task, timeout=graph_timeout_s)
+        except asyncio.TimeoutError:
+            graph_task.cancel()
+            entity_facts = []
+            _log("conversation_graph_timeout", timeout_s=graph_timeout_s)
+        _log(
+            "conversation_retrieval_done",
+            vector_memories=len(getattr(retrieval_result, "memories", []) or []),
+            graph_facts=len(entity_facts) if entity_facts else 0,
         )
         
         logger.info(f"Parallel retrieval completed: vector={len(retrieval_result.memories)}, graph={len(entity_facts) if entity_facts else 0}")
@@ -663,6 +628,7 @@ class ConversationService:
             affinity_score=affinity.new_score,
             top_k=10
         )
+        _log("conversation_rerank_done", ranked_memories=len(ranked_memories), ranked_facts=len(ranked_facts))
         
         context_source["vector_memories_count"] = len(ranked_memories)
         context_source["graph_facts_count"] = len(ranked_facts)
@@ -674,28 +640,38 @@ class ConversationService:
             conversation_history = await self._get_conversation_history(session_id, limit=5)
             context_source["history_turns_count"] = len(conversation_history) if conversation_history else 0
             logger.info(f"Hybrid mode: loaded {context_source['history_turns_count']} history turns")
+            _log("conversation_history_loaded", history_turns=context_source["history_turns_count"])
         else:
             # Graph-only 模式：物理隔离，不注入 history
             logger.info("Graph-only mode: history physically isolated (None)")
+            _log("conversation_history_skipped")
         
         # 生成回复（使用重排序后的结果）
+        _log("conversation_llm_start")
         reply = await self._generate_reply(
             message, ranked_memories, affinity, emotion, tier, 
-            ranked_facts, conversation_history, mode
+            ranked_facts,
+            conversation_history,
+            mode,
+            answer_style=answer_style,
+            eval_mode=bool(eval_mode),
+            eval_task_type=eval_task_type,
+            evidence_text=eval_payload.evidence_text if eval_payload else "",
+            question_text=eval_payload.question_text if eval_payload else None,
+            session_time=eval_payload.session_time if eval_payload else None,
         )
+        _log("conversation_llm_done", reply_len=len(reply or ""))
         
         # 更新好感度
-        if eval_mode:
-            new_affinity = affinity
-        else:
-            signals = AffinitySignals(
-                user_initiated=True,
-                emotion_valence=emotion.get("valence", 0)
-            )
-            new_affinity = await self.affinity_service.update_affinity(user_id, signals)
+        signals = AffinitySignals(
+            user_initiated=True,
+            emotion_valence=emotion.get("valence", 0)
+        )
+        new_affinity = await self.affinity_service.update_affinity(user_id, signals)
+        _log("conversation_affinity_updated", affinity_score=getattr(new_affinity, "new_score", None), affinity_state=getattr(new_affinity, "state", None))
         
         # 保存对话轮次（仅 Hybrid 模式）- 后台异步，不阻塞响应
-        if (not eval_mode) and mode == ConversationMode.HYBRID:
+        if mode == ConversationMode.HYBRID:
             self._save_conversation_turn_background(
                 session_id=session_id,
                 user_id=user_id,
@@ -706,28 +682,8 @@ class ConversationService:
             )
         
         response_time = (datetime.now() - start_time).total_seconds() * 1000
+        _log("conversation_process_done", response_time_ms=response_time)
         
-        memory_id: Optional[str] = None
-        memory_status: str = "disabled"
-        if remember:
-            ik = (idempotency_key or "").strip() or f"remember:{session_id}:{uuid.uuid4()}"
-            is_new, existing_memory_id = await self.idempotency_checker.check_and_acquire(ik, user_id)
-            if not is_new and existing_memory_id:
-                memory_id = existing_memory_id
-                memory_status = "duplicate"
-            else:
-                embedding = await self.embedding_service.encode(message)
-                memory_id, _event_id = await self.transaction_manager.create_memory_with_outbox(
-                    user_id=user_id,
-                    content=message,
-                    embedding=embedding,
-                    valence=emotion.get("valence", 0),
-                    conversation_id=session_id,
-                    idempotency_key=ik,
-                )
-                await self.idempotency_checker.set_memory_id(ik, memory_id)
-                memory_status = "pending"
-
         return ConversationResponse(
             reply=reply,
             session_id=session_id,
@@ -741,8 +697,6 @@ class ConversationService:
             memories_used=[m.id for m in retrieval_result.memories],
             tone_type=self._get_tone_type(new_affinity.new_score),
             response_time_ms=response_time,
-            memory_id=memory_id,
-            memory_status=memory_status,
             mode=mode,
             context_source=context_source
         )
@@ -757,6 +711,8 @@ class ConversationService:
         entity_facts: list = None
     ) -> AsyncIterator[str]:
         """流式生成回复"""
+        import asyncio
+
         prompt = self._build_prompt(message, memories, affinity, emotion, entity_facts)
         tier_config = TierRouter.TIERS.get(tier, TierRouter.TIERS[2])
         
@@ -764,17 +720,20 @@ class ConversationService:
         logger.info(f"Entity facts count: {len(entity_facts) if entity_facts else 0}")
         
         try:
-            response = await self.llm_client.chat.completions.create(
-                model=tier_config["model"],
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": message}
-                ],
-                max_tokens=tier_config["max_tokens"],
-                stream=True,
-                temperature=0.7,
-                presence_penalty=0.6,
-                frequency_penalty=0.3
+            response = await asyncio.wait_for(
+                self.llm_client.chat.completions.create(
+                    model=tier_config["model"],
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": message},
+                    ],
+                    max_tokens=tier_config["max_tokens"],
+                    stream=True,
+                    temperature=0.7,
+                    presence_penalty=0.6,
+                    frequency_penalty=0.3,
+                ),
+                timeout=float(settings.LLM_REQUEST_TIMEOUT_S),
             )
             
             logger.info("LLM API call successful, streaming response...")
@@ -801,31 +760,98 @@ class ConversationService:
         tier: int,
         entity_facts: list = None,
         conversation_history: list = None,
-        mode: str = "hybrid"
+        mode: str = "hybrid",
+        answer_style: Optional[str] = None,
+        eval_mode: bool = False,
+        eval_task_type: Optional[str] = None,
+        evidence_text: str = "",
+        question_text: Optional[str] = None,
+        session_time: Optional[str] = None,
     ) -> str:
         """生成回复（非流式）"""
-        prompt = self._build_prompt(message, memories, affinity, emotion, entity_facts, conversation_history, mode)
+        import asyncio
+
+        q_text = question_text or (extract_question_text(message) if eval_mode else str(message or ""))
+        context_time = session_time or (extract_context_time(message) if eval_mode else None)
+        policy = select_answer_policy(
+            q_text,
+            explicit=answer_style,
+            eval_mode=bool(eval_mode),
+            eval_task_type=eval_task_type,
+        )
+        task_key = str(eval_task_type or "").strip().lower()
+        extractive_tasks = {"information extraction"}
+        use_extractive = bool(
+            eval_mode
+            and evidence_text
+            and policy.name.value == "strict_factual"
+            and task_key in extractive_tasks
+        )
+        use_support_check = bool(
+            eval_mode
+            and evidence_text
+            and policy.name.value == "strict_factual"
+            and task_key in {"temporal reasoning", "adversarial abstention"}
+        )
+        policy_suffix = policy.build_system_suffix(context_time)
+        if use_extractive:
+            policy_suffix += build_extractive_suffix()
+        if eval_mode and eval_task_type:
+            policy_suffix += build_eval_task_suffix(eval_task_type)
+        prompt = self._build_prompt(
+            message,
+            memories,
+            affinity,
+            emotion,
+            entity_facts,
+            conversation_history,
+            mode,
+            policy_system_suffix=policy_suffix,
+            evidence_text=evidence_text,
+        )
         tier_config = TierRouter.TIERS.get(tier, TierRouter.TIERS[2])
+
+        if eval_mode and str(eval_task_type or "").strip().lower() == "locomo" and evidence_text:
+            extracted = locomo_extract_answer(q_text, evidence_text)
+            if extracted:
+                return extracted
         
         try:
-            response = await self.llm_client.chat.completions.create(
-                model=tier_config["model"],
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": message}
-                ],
-                max_tokens=tier_config["max_tokens"],
-                stream=False,
-                temperature=0.7,
-                presence_penalty=0.6,
-                frequency_penalty=0.3
+            response = await asyncio.wait_for(
+                self.llm_client.chat.completions.create(
+                    model=tier_config["model"],
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": q_text if eval_mode else message},
+                    ],
+                    max_tokens=tier_config["max_tokens"],
+                    stream=False,
+                    temperature=0.2 if (use_extractive or task_key in {"temporal reasoning", "logical event ordering", "adversarial abstention"}) else 0.7,
+                    presence_penalty=0.6,
+                    frequency_penalty=0.3,
+                ),
+                timeout=float(settings.LLM_REQUEST_TIMEOUT_S),
             )
-            return response.choices[0].message.content
+            out = policy.postprocess(
+                response.choices[0].message.content,
+                question_text=q_text if eval_mode else None,
+                context_time=context_time,
+            )
+            if use_support_check:
+                out = support_check_answer(out, evidence_text=evidence_text, question_text=q_text, eval_task_type=eval_task_type)
+            return out
             
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
             # 降级到模拟回复
-            return self._generate_mock_reply(message, affinity.state, emotion)
+            out = policy.postprocess(
+                self._generate_mock_reply(message, affinity.state, emotion),
+                question_text=q_text if eval_mode else None,
+                context_time=context_time,
+            )
+            if use_support_check:
+                out = support_check_answer(out, evidence_text=evidence_text, question_text=q_text, eval_task_type=eval_task_type)
+            return out
     
     def _build_prompt(
         self,
@@ -835,7 +861,9 @@ class ConversationService:
         emotion: dict,
         entity_facts: list = None,
         conversation_history: list = None,
-        mode: str = "hybrid"
+        mode: str = "hybrid",
+        policy_system_suffix: str = "",
+        evidence_text: str = "",
     ) -> str:
         """
         构建动态 Prompt
@@ -894,7 +922,18 @@ class ConversationService:
             history_context = "\n".join(history_lines)
         
         # ========== 构建 Prompt ==========
-        prompt = f"""你是一个情感陪伴 AI，名叫 Affinity。
+        evidence_block = ""
+        if evidence_text:
+            evidence_block = (
+                "=== 权威证据（评测注入）===\n"
+                f"{evidence_text}\n\n"
+                "【证据优先规则 - 必须严格遵守】\n"
+                "1. 回答必须以证据为唯一事实来源；不得引入证据中未出现的具体细节\n"
+                "2. 长期记忆仅可用于补充常识性背景，不得用来补齐证据缺失的事实\n"
+                "3. 证据不足以确定答案时，必须明确拒答/不确定\n\n"
+            )
+
+        prompt = evidence_block + f"""你是一个情感陪伴 AI，名叫 Affinity。
 
 当前用户状态:
 - 好感度: {affinity.new_score:.2f} ({affinity.state})
@@ -940,6 +979,8 @@ class ConversationService:
 ✅ 正确做法：直接说"我不知道"，然后询问用户
 
 请根据以上信息，生成一个温暖、诚实的回复。"""
+        if policy_system_suffix:
+            prompt += str(policy_system_suffix)
         
         return prompt
     

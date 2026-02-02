@@ -1,5 +1,14 @@
 # AI 编程助手规则（Kiro/Trae 专用）
 
+## 🧯 命令安全规范（强制）
+
+- 禁止在 PowerShell 里直接粘贴多行 Python 代码（会被当成 shell 语句执行）。
+- 禁止使用高风险 `python -c`：
+  - 多行语句、包含 JSON/字典/大括号、包含嵌套引号、需要复杂转义的命令，一律改为写入 `.py` 文件再运行。
+- 运行 LoCoMo/KnowMeBench 前必须先做环境预检：
+  - 优先执行 `python evals/check_eval_env.py`
+  - 或使用已内置预检的入口脚本（可用 `--skip_env_check` 显式跳过）
+
 ## 📋 修改前必做（BEFORE）
 
 ### 1. 说明改动计划
